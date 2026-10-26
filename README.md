@@ -53,7 +53,7 @@ Vercel and Cloudflare create `deployment_status` events for every deploy. The ac
 | `top` | `30` | How many URLs to check, 1 to 50. |
 | `environment` | `production` | Deployment environment that triggers the check. |
 | `fail-on` | `5xx,noindex,regression` | What turns the Check red. Add `miss`, `client-error` or `incomplete` for a stricter Check. |
-| `version` | `1.0.2` | sitewarm CLI release. The download is checked against the release's SHA-256 file before it runs. |
+| `version` | `1.0.2` | sitewarm CLI release. The default is pinned in the action together with its SHA-256; another version is checked against that release's SHA-256 file. Either way the download is verified before it runs. |
 | `github-token` | the workflow token | Needs `checks: write`, `deployments: read` and `contents: read`. |
 
 Output: `conclusion` (`success`, `neutral` or `failure`).
