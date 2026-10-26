@@ -1,0 +1,296 @@
+name: sitewarm
+description: After a Production deploy, check the CDN cache and the key pages and post a GitHub Check with what changed.
+author: sitewarm
+branding:
+  icon: check-circle
+  color: orange
+
+inputs:
+  site-url:
+    description: Origin of the site to check, for example https://www.example.com (no path).
+    required: true
+  urls-file:
+    description: CSV in your repo with a url or path column, most important pages first. If empty, the first URLs of the sitemap are used.
+    required: false
+    default: ''
+  sitemap-url:
+    description: Sitemap URL used when urls-file is empty. Defaults to site-url plus /sitemap.xml.
+    required: false
+    default: ''
+  top:
+    description: How many URLs to check (1 to 50).
+    required: false
+    default: '30'
+  environment:
+    description: Deployment environment that triggers the check, compared without case. Used for deployment_status events.
+    required: false
+    default: production
+  fail-on:
+    description: Comma list that turns the Check red. Default 5xx,noindex,regression. Add miss to make a MISS red.
+    required: false
+    default: 5xx,noindex,regression
+  version:
+    description: sitewarm CLI release to download (without the v).
+    required: false
+    default: '1.0.2'
+  github-token:
+    description: Token used to create the Check. Needs checks write, deployments read and contents read.
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  conclusion:
+    description: success, neutral or failure.
+    value: ${{ steps.render.outputs.conclusion }}
+
+runs:
+  using: composite
+  steps:
+    - name: Decide whether to run
+      id: guard
+      shell: bash
+      env:
+        WANT_ENV: ${{ inputs.environment }}
+      run: |
+        set -euo pipefail
+        sha="$GITHUB_SHA"; env_name="$WANT_ENV"; run=true
+        if [ "$GITHUB_EVENT_NAME" = "deployment_status" ]; then
+          state="$(jq -r '.deployment_status.state' "$GITHUB_EVENT_PATH")"
+          env_name="$(jq -r '.deployment.environment' "$GITHUB_EVENT_PATH")"
+          sha="$(jq -r '.deployment.sha' "$GITHUB_EVENT_PATH")"
+          want="$(printf '%s' "$WANT_ENV" | tr '[:upper:]' '[:lower:]')"
+          have="$(printf '%s' "$env_name" | tr '[:upper:]' '[:lower:]')"
+          if [ "$state" != "success" ] || [ "$have" != "$want" ]; then
+            run=false
+            echo "::notice title=sitewarm::Skipped: deployment state is '$state' for environment '$env_name' (this action runs on success for '$WANT_ENV')."
+          fi
+        fi
+        if [ "$GITHUB_EVENT_NAME" = "pull_request" ] || [ "$GITHUB_EVENT_NAME" = "pull_request_target" ]; then
+          run=false
+          echo "::notice title=sitewarm::Skipped on pull request events. Run this action after a Production deploy."
+        fi
+        { echo "run=$run"; echo "sha=$sha"; echo "environment=$env_name"; } >> "$GITHUB_OUTPUT"
+
+    - name: Download and verify the sitewarm CLI
+      if: steps.guard.outputs.run == 'true'
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        if [ "$RUNNER_OS" != "Linux" ]; then echo "::error title=sitewarm::This action supports Linux runners only."; exit 1; fi
+        case "$RUNNER_ARCH" in X64) arch=amd64;; ARM64) arch=arm64;; *) echo "::error title=sitewarm::Unsupported architecture $RUNNER_ARCH"; exit 1;; esac
+        base="https://github.com/sitewarm/sitewarm/releases/download/v${VERSION}"
+        name="sitewarm_${VERSION}_linux_${arch}.tar.gz"
+        dir="$RUNNER_TEMP/sitewarm-cli"; mkdir -p "$dir"
+        curl -fsSL --retry 3 -o "$dir/$name" "$base/$name"
+        curl -fsSL --retry 3 -o "$dir/checksums.txt" "$base/checksums.txt"
+        (cd "$dir" && grep -F "  $name" checksums.txt | sha256sum -c -)
+        tar -xzf "$dir/$name" -C "$dir" sitewarm
+        "$dir/sitewarm" --version || true
+
+    - name: Read the previous Production receipt
+      if: steps.guard.outputs.run == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        SHA: ${{ steps.guard.outputs.sha }}
+        ENV_NAME: ${{ steps.guard.outputs.environment }}
+      run: |
+        set -uo pipefail
+        out="$RUNNER_TEMP/sitewarm-prev.json"; : > "$out"
+        api="${GITHUB_API_URL:-https://api.github.com}/repos/$GITHUB_REPOSITORY"
+        shas="$(curl -fsS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+                "$api/deployments?environment=$(jq -rn --arg e "$ENV_NAME" '$e|@uri')&per_page=10" 2>/dev/null \
+                | jq -r --arg s "$SHA" '[.[].sha] | map(select(. != $s)) | unique_by(.) | .[0:5][]' 2>/dev/null)" || shas=""
+        for s in $shas; do
+          summary="$(curl -fsS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+                     "$api/commits/$s/check-runs?check_name=sitewarm" 2>/dev/null | jq -r '.check_runs[0].output.summary // empty' 2>/dev/null)" || continue
+          blob="$(printf '%s' "$summary" | grep -o 'sitewarm-receipt:v1:[A-Za-z0-9+/=]*' | head -1 | cut -d: -f3)" || true
+          if [ -n "${blob:-}" ] && printf '%s' "$blob" | base64 -d 2>/dev/null | gunzip -c > "$out" 2>/dev/null && jq -e type "$out" >/dev/null 2>&1; then break; fi
+          : > "$out"
+        done
+        [ -s "$out" ] && echo "Found the previous receipt." || echo "No previous receipt: this run is the baseline."
+
+    - name: Scan
+      if: steps.guard.outputs.run == 'true'
+      id: scan
+      shell: bash
+      env:
+        SITE_URL: ${{ inputs.site-url }}
+        URLS_FILE: ${{ inputs.urls-file }}
+        SITEMAP_URL: ${{ inputs.sitemap-url }}
+        TOP: ${{ inputs.top }}
+      run: |
+        set -uo pipefail
+        case "$TOP" in ''|*[!0-9]*) echo "::error title=sitewarm::top must be a number from 1 to 50."; exit 1;; esac
+        if [ "$TOP" -lt 1 ] || [ "$TOP" -gt 50 ]; then echo "::error title=sitewarm::top must be from 1 to 50."; exit 1; fi
+        site="${SITE_URL%/}"
+        report="$RUNNER_TEMP/sitewarm-report.json"
+        if [ -n "$URLS_FILE" ]; then
+          args=(--top-from "$GITHUB_WORKSPACE/$URLS_FILE" --base-url "$site")
+        else
+          args=(--from-sitemap "${SITEMAP_URL:-$site/sitemap.xml}")
+        fi
+        rc=0
+        "$RUNNER_TEMP/sitewarm-cli/sitewarm" scan "${args[@]}" --top "$TOP" --format json --report "$report" --fail-on "" >/dev/null || rc=$?
+        if [ "$rc" -eq 2 ] || [ ! -s "$report" ]; then
+          echo "::error title=sitewarm::The CLI could not run (exit $rc). Check site-url, urls-file and sitemap-url."
+          exit 1
+        fi
+        echo "report=$report" >> "$GITHUB_OUTPUT"
+
+    - name: Build the verdict
+      if: steps.guard.outputs.run == 'true'
+      id: render
+      shell: bash
+      env:
+        REPORT: ${{ steps.scan.outputs.report }}
+        FAIL_ON: ${{ inputs.fail-on }}
+        SITE_URL: ${{ inputs.site-url }}
+        SHA: ${{ steps.guard.outputs.sha }}
+        OUT: ${{ runner.temp }}/sitewarm-out
+      run: |
+        set -euo pipefail
+        [ -s "$RUNNER_TEMP/sitewarm-prev.json" ] && export PREV="$RUNNER_TEMP/sitewarm-prev.json" || export PREV=""
+        cat > "$RUNNER_TEMP/render.sh" <<'SITEWARM_RENDER_EOF'
+        #!/usr/bin/env bash
+        # Builds the Check text and verdict from a sitewarm JSON report (CLI v1.x) and, optionally, the previous deploy's
+        # compact state. Inputs (env): REPORT, PREV (path or empty), FAIL_ON, SITE_URL, SHA, OUT (directory).
+        # Outputs in $OUT: summary.md, title.txt, conclusion.txt (success|failure|neutral), state.json.
+        set -euo pipefail
+
+        : "${REPORT:?}" "${FAIL_ON:=5xx,noindex,regression}" "${SITE_URL:=}" "${SHA:=}" "${OUT:?}"
+        PREV="${PREV:-}"
+        mkdir -p "$OUT"
+
+        # One compact row per result; the key is url + profile.
+        jq '[.results[] | {
+              k: (.url + "|" + (.profile // "")),
+              u: .url, pf: (.profile // ""), s: .state, h: (.http_status // null), i: (.indexability // null),
+              d: (.indexability_detail // null), p: (.pop // null), cc: (.cache_control // null),
+              v: (.vary // null), sc: (.set_cookie // false), det: (.detail // null)
+            }]' "$REPORT" > "$OUT/state.json"
+
+        if [ -n "$PREV" ] && [ -s "$PREV" ]; then PREV_JSON="$PREV"; else PREV_JSON="$OUT/none.json"; echo '[]' > "$PREV_JSON"; fi
+        HAVE_PREV=false; [ -n "$PREV" ] && [ -s "$PREV" ] && HAVE_PREV=true
+
+        jq -r --argjson havePrev "$HAVE_PREV" --arg failOn "$FAIL_ON" --arg site "$SITE_URL" --arg sha "$SHA" \
+           --slurpfile prev "$PREV_JSON" --slurpfile rep "$REPORT" --arg out "$OUT" '
+          def esc: if . == null then "" else (tostring | gsub("\\|"; "\\|") | gsub("\n"; " ")) end;
+          def path: (. | sub("^https?://[^/]+"; "") | if . == "" then "/" else . end);
+          def lbl: ((.u | path) + (if .pf != "" then " (" + .pf + ")" else "" end));
+          def skipped: (.s == "skipped-robots" or .s == "incomplete");
+          def err: (.s == "error");
+          def noidx: (.i == "noindex" or .i == "indexability-error");
+          def isok: (.s == "hit" and (err | not) and (noidx | not));
+          def cause:
+            if err then {c: "No response or a 5xx after 3 retries", f: "Check the origin and the CDN for errors at deploy time"}
+            elif noidx then {c: ("The page is served with noindex" + (if .d then " (" + (.d | tostring) + ")" else "" end)),
+                             f: "Remove the noindex directive if this page should be indexed"}
+            elif .s == "challenged" then {c: "A bot challenge answered the runner", f: "Allow the sitewarm User-Agent token in your bot protection; a User-Agent rule may not be enough"}
+            elif .s == "client-error" then {c: "The URL answers with a 4xx", f: "Check that the page still exists or update your URL list"}
+            elif .s == "redirect-error" then {c: "The redirect chain failed", f: "Check the redirect rules for this URL"}
+            elif .s == "skipped-robots" then {c: "robots.txt does not allow this URL", f: "Not checked"}
+            elif .s == "incomplete" then {c: "The run ended before this URL was verified", f: "Re-run the workflow"}
+            elif .s == "hit" then {c: "", f: ""}
+            elif .sc == true then {c: "A Set-Cookie header makes many CDNs skip the cache", f: "Remove it from cacheable pages or serve them without a cookie"}
+            elif (.cc // "" | test("no-store|private|max-age=0|no-cache"; "i")) then {c: ("Cache-Control is " + (.cc | tostring)), f: "Use a public Cache-Control with a positive s-maxage or max-age if this page should be cached"}
+            elif (.v // "" | test("cookie|\\*"; "i")) then {c: ("Vary is " + (.v | tostring)), f: "Vary on cookie or * splits or disables the cache; vary on less if you can"}
+            elif .s == "bypass" then {c: "The CDN reported a bypass", f: "Check the CDN rules and the response headers for this URL"}
+            else {c: ("Cause not determined" + (if .det then ": " + (.det | tostring) else "" end)), f: ""} end;
+
+          . as $cur
+          | ($prev[0] // []) as $p
+          | ($p | map({(.k): .}) | add // {}) as $pm
+          | ($cur | map(select(skipped | not))) as $ver
+          | ($cur | map(select(err))) as $errs
+          | ($cur | map(select(noidx))) as $nois
+          | ($cur | map(. as $r | ($pm[$r.k]) as $q
+                | if $q == null or ($r | skipped) then empty
+                  elif (($q | err) | not) and (($q | skipped) | not) and ($r | err) then {k: $r.k, u: $r.u, pf: $r.pf, kind: "became an error or 5xx"}
+                  elif $q.i == "indexable" and ($r | noidx) then {k: $r.k, u: $r.u, pf: $r.pf, kind: "indexable to noindex"}
+                  elif $q.s == "hit" and $r.s != "hit" and (($r | err) | not) and (($r | noidx) | not) then {k: $r.k, u: $r.u, pf: $r.pf, kind: ("HIT to " + $r.s)}
+                  else empty end)) as $reg
+          | ($cur | map(. as $r | ($pm[$r.k]) as $q
+                | if $q == null or ($r | skipped) then empty
+                  elif ($q | err) and (($r | err) | not) then $r
+                  elif ($q | noidx) and (($r | noidx) | not) then $r
+                  elif $q.s != "hit" and (($q | err) | not) and $r.s == "hit" then $r
+                  else empty end)) as $rec
+          | ($failOn | split(",") | map(gsub("^\\s+|\\s+$"; ""))) as $fo
+          | ($fo | index("5xx") != null) as $f5 | ($fo | index("noindex") != null) as $fn | ($fo | index("regression") != null) as $fr
+          | ($fo | index("miss") != null) as $fm | ($fo | index("client-error") != null) as $fc | ($fo | index("incomplete") != null) as $fi
+          | ($cur | map(select(.s == "miss")) | length) as $nmiss
+          | ($cur | map(select(.s == "client-error")) | length) as $ncl
+          | ($cur | map(select(.s == "incomplete")) | length) as $ninc
+          | ([($f5 and ($errs | length) > 0), ($fn and ($nois | length) > 0), ($fr and ($reg | length) > 0),
+              ($fm and $nmiss > 0), ($fc and $ncl > 0), ($fi and $ninc > 0)] | any) as $fail
+          | (if ($ver | length) == 0 then "neutral" elif $fail then "failure"
+             elif ($ver | all(.s == "hit")) then "success" else "neutral" end) as $concl
+          | ($cur | map(select(.s == "hit")) | length) as $nhit
+          | ($cur | map(.p) | map(select(. != null)) | unique | join(", ")) as $pops
+          | (if $pops == "" then "PoP not reported by the CDN" else "PoP " + $pops end) as $popcopy
+          | ($cur | map(select((isok | not) and (skipped | not) or skipped))) as $problems
+          | ($problems | length) as $np
+          | ($problems[0:50]) as $shown
+          | ($concl) as $cc
+          | {
+              conclusion: $cc,
+              title: ($nhit | tostring) + "/" + (($cur | length) | tostring) + " HIT, " + ($errs | length | tostring) + " errors, "
+                     + ($nois | length | tostring) + " noindex, " + ($reg | length | tostring) + " regressions",
+              summary: (
+                "**" + (if $cc == "success" then "Passed" elif $cc == "failure" then "Regression found"
+                         elif ($ver | length) == 0 then "Nothing could be verified" else "No regression; some URLs are not served from cache" end) + "**"
+                + (if $cc == "neutral" and ($ver | length) == 0 then " (the list, robots.txt or the run prevented any verification; this is not a regression)" else "" end)
+                + "\n\nMeasured from the GitHub Actions runner (" + $popcopy + "). Only that PoP was checked; other PoPs were not."
+                + (if $site != "" then "\nSite: " + $site else "" end) + (if $sha != "" then "\nCommit: `" + $sha[0:12] + "`" else "" end)
+                + "\n\n| HIT | MISS | Other cache states | Errors (5xx, timeout) | noindex | Not checked |\n|---|---|---|---|---|---|\n| "
+                + ($nhit | tostring) + " | " + ($nmiss | tostring) + " | "
+                + (($cur | map(select(.s != "hit" and .s != "miss" and (skipped | not) and (err | not))) | length) | tostring) + " | "
+                + ($errs | length | tostring) + " | " + ($nois | length | tostring) + " | " + (($cur | map(select(skipped)) | length) | tostring) + " |"
+                + "\n\nCanonical: not measured by this version."
+                + "\n\n### What changed since the previous Production deploy\n"
+                + (if ($havePrev | not) then "First run for this environment: this is the baseline, nothing to compare."
+                   elif ($reg | length) == 0 and ($rec | length) == 0 then "No change in HIT, errors or noindex."
+                   else
+                     (if ($reg | length) > 0 then "**Regressions**\n" + ($reg | map("- `" + lbl + "`: " + .kind) | join("\n")) + "\n" else "" end)
+                     + (if ($rec | length) > 0 then "\n**Recovered**\n" + ($rec | map("- `" + lbl + "`") | join("\n")) + "\n" else "" end)
+                   end)
+                + (if $np == 0 then "" else
+                    "\n\n### URLs to look at\n\n| URL | State | Status | Cause | Fix |\n|---|---|---|---|---|\n"
+                    + ($shown | map("| `" + (lbl | esc) + "` | " + (.s | esc) + " | " + (.h | esc) + " | " + (cause.c | esc) + " | " + (cause.f | esc) + " |") | join("\n"))
+                    + (if $np > 50 then "\n\nand " + (($np - 50) | tostring) + " more." else "" end) end)
+                + "\n\nThe verdict follows `fail-on: " + $failOn + "`. MISS alone never turns the Check red (it shows as neutral) unless `miss` is in that list."
+              )
+            }' "$OUT/state.json" > "$OUT/result.json"
+
+        jq -r .conclusion "$OUT/result.json" > "$OUT/conclusion.txt"
+        jq -r .title "$OUT/result.json" > "$OUT/title.txt"
+        jq -r .summary "$OUT/result.json" > "$OUT/summary.md"
+        SITEWARM_RENDER_EOF
+        bash "$RUNNER_TEMP/render.sh"
+        echo "conclusion=$(cat "$OUT/conclusion.txt")" >> "$GITHUB_OUTPUT"
+
+    - name: Publish the Check
+      if: steps.guard.outputs.run == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        SHA: ${{ steps.guard.outputs.sha }}
+        OUT: ${{ runner.temp }}/sitewarm-out
+      run: |
+        set -uo pipefail
+        marker="$(gzip -c "$OUT/state.json" | base64 -w0)"
+        text="$(head -c 58000 "$OUT/summary.md")"
+        printf '%s\n\n<!-- sitewarm-receipt:v1:%s -->\n' "$text" "$marker" > "$OUT/check-summary.md"
+        cat "$OUT/summary.md" >> "$GITHUB_STEP_SUMMARY"
+        body="$(jq -n --arg sha "$SHA" --arg title "$(cat "$OUT/title.txt")" --rawfile summary "$OUT/check-summary.md" \
+                   --arg c "$(cat "$OUT/conclusion.txt")" --arg url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+                   '{name:"sitewarm", head_sha:$sha, status:"completed", conclusion:$c, details_url:$url, output:{title:$title, summary:$summary}}')"
+        code="$(curl -sS -o "$OUT/check-response.json" -w '%{http_code}' -X POST \
+                -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+                "${GITHUB_API_URL:-https://api.github.com}/repos/$GITHUB_REPOSITORY/check-runs" -d "$body")" || code=000
+        if [ "$code" != "201" ]; then
+          echo "::warning title=sitewarm::The Check could not be created (HTTP $code). The result is in the job summary. Add 'checks: write' to the workflow permissions."
+        fi
