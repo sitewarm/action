@@ -33,6 +33,14 @@ inputs:
     description: sitewarm CLI release to download (without the v).
     required: false
     default: '1.0.2'
+  site-token:
+    description: Optional. A sitewarm site token (swr_...) from your site page. When set, the result is also sent to sitewarm to keep deploy history. A failure there never changes the Check.
+    required: false
+    default: ''
+  receipt-endpoint:
+    description: Where the deploy receipt is sent when site-token is set. Must be https.
+    required: false
+    default: https://sitewarm.dev/api/ingest/deploy-receipts
   github-token:
     description: Token used to create the Check. Needs checks write, deployments read and contents read.
     required: false
@@ -285,6 +293,65 @@ runs:
         SITEWARM_RENDER_EOF
         bash "$RUNNER_TEMP/render.sh"
         echo "conclusion=$(cat "$OUT/conclusion.txt")" >> "$GITHUB_OUTPUT"
+
+    - name: Send the deploy receipt
+      if: steps.guard.outputs.run == 'true' && inputs.site-token != ''
+      shell: bash
+      env:
+        SITE_TOKEN: ${{ inputs.site-token }}
+        ENDPOINT: ${{ inputs.receipt-endpoint }}
+        REPORT: ${{ steps.scan.outputs.report }}
+        SHA: ${{ steps.guard.outputs.sha }}
+        ENV_NAME: ${{ steps.guard.outputs.environment }}
+        OUT: ${{ runner.temp }}/sitewarm-out
+      run: |
+        # Optional and never fatal: whatever happens here, the Check below is published and its conclusion is unchanged.
+        set -uo pipefail
+        echo "::add-mask::$SITE_TOKEN"
+        note() { printf '\n\n%s\n' "$1" >> "$OUT/summary.md"; }
+        case "$SITE_TOKEN" in swr_?*) ;; *) echo "::warning title=sitewarm::site-token does not look like a sitewarm site token (swr_...). The deploy receipt was not sent."; exit 0;; esac
+        case "$ENDPOINT" in https://?*) ;; *) echo "::warning title=sitewarm::receipt-endpoint must start with https://. The deploy receipt was not sent."; exit 0;; esac
+        ref="${GITHUB_REF:-}"
+        if [ "$GITHUB_EVENT_NAME" = "workflow_run" ]; then
+          b="$(jq -r '.workflow_run.head_branch // empty' "$GITHUB_EVENT_PATH" 2>/dev/null)"; [ -n "$b" ] && ref="refs/heads/$b"
+        elif [ "$GITHUB_EVENT_NAME" = "deployment_status" ]; then
+          r="$(jq -r '.deployment.ref // empty' "$GITHUB_EVENT_PATH" 2>/dev/null)"
+          case "$r" in refs/*) ref="$r";; ''|*[!A-Za-z0-9._/-]*) ;; *) [ "${#r}" -ne 40 ] && ref="refs/heads/$r";; esac
+        fi
+        environment="$(printf '%s' "$ENV_NAME" | tr '[:upper:]' '[:lower:]')"
+        req="$OUT/receipt-request.json"; resp="$OUT/receipt-response.json"
+        # Only fields the contract lists; no header values, cookies or bodies leave the runner.
+        if ! jq -n --slurpfile rep "$REPORT" --arg sha "$SHA" --arg ref "$ref" --arg repo "$GITHUB_REPOSITORY" \
+             --arg environment "$environment" --arg run "$GITHUB_RUN_ID" --argjson attempt "${GITHUB_RUN_ATTEMPT:-1}" '
+            $rep[0] as $r
+            | ($r.results | map(.pop) | map(select(. != null and . != "")) | group_by(.) | map({p: .[0], n: length}) | sort_by(-.n) | .[0].p // null) as $pop
+            | {schema: 1,
+               run: {id: $run, attempt: $attempt, started_at: $r.started_at, finished_at: $r.finished_at},
+               commit: {sha: $sha, ref: $ref},
+               repo: $repo, environment: $environment,
+               client: {name: "sitewarm", version: $r.version},
+               measured_from: ({kind: "github-actions-runner"} + (if $pop then {pop: $pop} else {} end)),
+               urls: [$r.results[] | {url, profile, cache: .state, warmed: (.warmed // false)}
+                      + (if .http_status then {status: .http_status} else {} end)
+                      + (if .indexability then {indexability: .indexability} else {} end)
+                      + (if .canonical then {canonical: .canonical} else {} end)
+                      + (if .ttfb_final_ms != null then {ttfb_ms: .ttfb_final_ms} else {} end)]}' > "$req"; then
+          echo "::warning title=sitewarm::Could not build the deploy receipt from the report. It was not sent."; exit 0
+        fi
+        # No redirects are followed, so the token is only ever sent to the endpoint. The receipt is idempotent per run, so retrying is safe.
+        rm -f "$resp"
+        code="$(curl -sS -o "$resp" -w '%{http_code}' --max-time 20 --retry 2 --retry-connrefused -X POST \
+                -H "Authorization: Bearer $SITE_TOKEN" -H 'Content-Type: application/json' --data-binary @"$req" "$ENDPOINT")" || code=000
+        if [ "$code" = "200" ]; then
+          link="$(jq -r '.site.url // empty' "$resp" 2>/dev/null | tr -cd '[:print:]' | head -c 300)"
+          case "$link" in https://*) note "Deploy history: $link";; *) note "Deploy history was saved.";; esac
+        else
+          c="$(jq -r '.code // empty' "$resp" 2>/dev/null | tr -cd 'a-z0-9_-' | head -c 64)"
+          a="$(jq -r '.action // empty' "$resp" 2>/dev/null | tr -cd '[:print:]' | tr -d '`|' | head -c 200)"
+          echo "::warning title=sitewarm::The deploy receipt was not saved (HTTP $code${c:+, $c}). The Check is not affected."
+          note "Deploy history was not saved (HTTP $code${c:+, $c})${a:+: $a}"
+        fi
+        exit 0
 
     - name: Publish the Check
       if: steps.guard.outputs.run == 'true'
