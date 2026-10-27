@@ -54,6 +54,8 @@ Vercel and Cloudflare create `deployment_status` events for every deploy. The ac
 | `environment` | `production` | Deployment environment that triggers the check. |
 | `fail-on` | `5xx,noindex,regression` | What turns the Check red. Add `miss`, `client-error` or `incomplete` for a stricter Check. |
 | `version` | `1.0.2` | sitewarm CLI release. The default is pinned in the action together with its SHA-256; another version is checked against that release's SHA-256 file. Either way the download is verified before it runs. |
+| `site-token` | empty | Optional. A sitewarm site token (`swr_...`) from your site page. Store it as a secret. See [Deploy history](#deploy-history-optional). |
+| `receipt-endpoint` | `https://sitewarm.dev/api/ingest/deploy-receipts` | Where the receipt goes when `site-token` is set. Must be `https`. |
 | `github-token` | the workflow token | Needs `checks: write`, `deployments: read` and `contents: read`. |
 
 Output: `conclusion` (`success`, `neutral` or `failure`).
@@ -65,6 +67,21 @@ Output: `conclusion` (`success`, `neutral` or `failure`).
 - **Red:** a regression against your previous Production deploy: a page that became an error or 5xx, a page that became `noindex`, or a page that was a HIT and no longer is.
 
 The first run is the baseline and compares nothing. The comparison uses the state after the CLI's warm-up retries, so a purge during the deploy does not turn every page red.
+
+## Deploy history (optional)
+
+Set `site-token` to also send the result of each deploy to sitewarm, which keeps the history and compares deploys:
+
+```yaml
+      - uses: sitewarm/action@v1
+        with:
+          site-url: https://www.example.com
+          site-token: ${{ secrets.SITEWARM_SITE_TOKEN }}
+```
+
+What is sent, over HTTPS to `receipt-endpoint`: the repository name, commit SHA and ref, the run id, the environment, the CLI version, the runner's PoP, and for each checked URL and profile its URL, HTTP status, cache state, indexability, canonical URL, TTFB and whether it was warmed. No header values, cookies or page bodies are sent. Redirects are not followed, so the token only goes to that endpoint.
+
+This step never changes the Check. If the token is wrong or sitewarm is unreachable, the Check is published as usual and its summary says the receipt was not saved. The canonical URL and the `warmed` flag need a CLI release newer than 1.0.2; with `version` 1.0.2 they are left out or `false`.
 
 ## Limits
 
