@@ -4,7 +4,8 @@ import sys
 
 
 def step_script(action_yml: str, step_name: str) -> str:
-    lines = open(action_yml, encoding="utf-8").read().split("\n")
+    with open(action_yml, encoding="utf-8") as f:
+        lines = f.read().split("\n")
     start = next((i for i, l in enumerate(lines) if re.fullmatch(r"    - name: " + re.escape(step_name), l)), None)
     if start is None:
         raise KeyError(step_name)

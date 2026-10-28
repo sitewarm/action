@@ -47,16 +47,32 @@ Vercel and Cloudflare create `deployment_status` events for every deploy. The ac
 
 | Input | Default | What it does |
 |---|---|---|
-| `site-url` | required | Origin of the site, for example `https://www.example.com`. |
+| `mode` | `local` | `local` (this page) or `hosted` (see "Hosted mode"). Never inferred from `api-key`. |
+| `site-url` | required in local mode | Origin of the site, for example `https://www.example.com`. |
 | `urls-file` | empty | CSV in your repo with a `path` or `url` column. If empty, the first URLs of the sitemap are used, which are not necessarily your most important pages. |
 | `sitemap-url` | `site-url` + `/sitemap.xml` | Used when `urls-file` is empty. |
 | `top` | `30` | How many URLs to check, 1 to 50. |
 | `environment` | `production` | Deployment environment that triggers the check. |
-| `fail-on` | `5xx,noindex,regression` | What turns the Check red. Add `miss`, `client-error` or `incomplete` for a stricter Check. |
+| `fail-on` | empty (local uses `5xx,noindex,regression`) | What turns the Check red. Add `miss`, `client-error` or `incomplete` for a stricter Check. |
 | `version` | `1.0.2` | sitewarm CLI release, without the leading `v`. Only versions pinned in the action together with their SHA-256 are accepted (today: `1.0.2`). Anything that is not a semantic version fails, and a valid version that is not pinned fails with the list of pinned ones; neither makes any request. Empty means the default. A new CLI version arrives with a new release of the action. The download is verified against the pinned SHA-256 before it runs. |
 | `github-token` | the workflow token | Needs `checks: write`, `deployments: read` and `contents: read`. |
 
-Output: `conclusion` (`success`, `neutral` or `failure`).
+Output: `conclusion` (`success`, `neutral` or `failure`). `run-id`, `hit-ratio` and `report-url` are empty in local mode.
+
+## Hosted mode
+
+`mode: hosted` starts a run in the sitewarm service for a site you have verified there, waits for it and fails the step by its verdict. It needs `node` 20 or later on the runner and no `GITHUB_TOKEN` permission.
+
+```yaml
+      - uses: sitewarm/action@v1
+        with:
+          mode: hosted
+          api-url: https://<host>/v1
+          api-key: ${{ secrets.SITEWARM_API_KEY }}
+          site: www.example.com
+```
+
+Hosted inputs: `api-key`, `api-url` (https), `site` or `sitemap-url`, `wait` (default `true`), `timeout` (default `15m`) and `fail-on` (cache states and `noindex`, or `none`; unset, the service default applies). They must be empty in local mode, and `site-url` and `urls-file` must be empty in hosted mode: a mismatch fails the step before any request. An empty `api-key` fails too, and never turns into a local run; this is what happens on pull requests from forks, where secrets are empty. Use one key per repository with only the scopes `sites:read`, `warm-runs:read` and `warm-runs:write` (plus `cache-reports:read` for `report-url`).
 
 ## What the Check says
 
