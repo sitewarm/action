@@ -193,6 +193,17 @@ class PinTable(unittest.TestCase):
         self.assertIn(default.group(1), {r[0] for r in rows})  # the input default is pinned
         self.assertIn(f'default_version="{default.group(1)}"', script)
 
+    def test_the_readme_version_row_names_exactly_the_pinned_versions_and_the_default(self):
+        script = step_script(ACTION, DOWNLOAD)
+        pinned = {l.split(" ")[0] for l in re.search(r"^pins='([^']*)'$", script, re.M).group(1).split("\n")}
+        default = re.search(r'^default_version="([^"]+)"$', script, re.M).group(1)
+        row = next(l for l in (ROOT / "README.md").read_text().split("\n") if l.startswith("| `version` |"))
+        cells = [c.strip() for c in row.strip("|").split("|")]
+        self.assertEqual(cells[1], f"`{default}`", "README default column differs from the pinned default")
+        today = re.search(r"\(today: ([^)]*)\)", row)
+        self.assertIsNotNone(today, "README version row lost its '(today: ...)' list")
+        self.assertEqual(set(re.findall(r"`([^`]+)`", today.group(1))), pinned, "README lists other versions than the pin table")
+
     def test_no_request_ever_names_a_checksums_file(self):
         script = step_script(ACTION, DOWNLOAD)
         code = "\n".join(l for l in script.split("\n") if not l.lstrip().startswith("#"))  # the comments explain why it is not used
