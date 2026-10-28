@@ -601,7 +601,10 @@ function renderSummary(r) {
   lines.push("| | |", "|---|---|");
   if (run2) lines.push(`| Run | ${code(run2.id)} |`, `| Status | ${code(run2.status)} |`);
   if (r.siteHostname) lines.push(`| Site | ${cell(r.siteHostname)} |`);
-  if (run2) lines.push(`| Effective fail-on | ${run2.options.fail_on === null ? "not reported yet" : run2.options.fail_on.length ? run2.options.fail_on.map(code).join(", ") : "none"} |`);
+  if (run2) {
+    const failOn = run2.options?.fail_on;
+    lines.push(`| Effective fail-on | ${failOn == null ? "not reported yet" : failOn.length ? failOn.map(code).join(", ") : "none"} |`);
+  }
   if (r.hitRatio) lines.push(`| Hit ratio | ${r.hitRatio} (hit results / all observed results) |`);
   if (r.reportUrl) lines.push(`| Cache status report | ${cell(r.reportUrl)} |`);
   lines.push("");

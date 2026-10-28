@@ -188,7 +188,7 @@ class FakeApi(http.server.BaseHTTPRequestHandler):
             return self._send(200, page([{"id": "site_1", "hostname": "example.com", "verification": {"status": "verified"}, "paused": False, "settings": {}, "created_at": "2026-10-01T00:00:00Z"}]))
         if path == "/sites/site_1/sitemaps":
             return self._send(200, page([{"id": "sm_1", "site_id": "site_1", "url": "https://example.com/sitemap.xml", "created_at": "2026-10-01T00:00:00Z"}]))
-        run = {"id": "run_1", "site_id": "site_1", "status": "queued", "trigger": {"type": "api"}, "options": {"fail_on": ["miss", "error", "incomplete", "noindex"]}, "outcome": None, "vantage_points": [], "created_at": "2026-10-18T00:00:00Z"}
+        run = {"id": "run_1", "site_id": "site_1", "status": "queued", "trigger": {"type": "api"}, "options": s.get("options", {"fail_on": ["miss", "error", "incomplete", "noindex"]}), "outcome": None, "vantage_points": [], "created_at": "2026-10-18T00:00:00Z"}
         if path == "/sites/site_1/warm-runs" and self.command == "POST":
             return self._send(202, run)
         if path == "/warm-runs/run_1":
@@ -217,9 +217,9 @@ class HostedAgainstAFakeServer(unittest.TestCase):
     def tearDownClass(cls):
         cls.server.shutdown()
 
-    def hosted(self, outcome=PASS, status=None, **over):
+    def hosted(self, outcome=PASS, status=None, options=None, **over):
         FakeApi.log = []
-        FakeApi.script = {"outcome": outcome, "status": status}
+        FakeApi.script = {"outcome": outcome, "status": status, **({"options": options} if options is not None else {})}
         tmp = pathlib.Path(tempfile.mkdtemp())
         gho, summary = tmp / "gho", tmp / "summary.md"
         gho.write_text("")
@@ -251,6 +251,15 @@ class HostedAgainstAFakeServer(unittest.TestCase):
         self.assertEqual(post["body"]["source"], {"type": "sitemap", "sitemap_id": "sm_1"})
         self.assertNotIn("options", post["body"])  # fail-on unset: the service default applies
         self.assertEqual([l for l in (r.stdout + r.stderr).splitlines() if KEY in l], [f"::add-mask::{KEY}"])
+
+    def test_a_run_without_options_fail_on_still_passes_and_says_not_reported(self):
+        # The API contract is a list or null; the first bundle crashed the summary on a missing field (fixed in 3d3f939).
+        for options in ({}, {"fail_on": None}):
+            r, _, summary, conclusion = self.hosted(options=options)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertNotIn("crashed", r.stdout)
+            self.assertIn("| Effective fail-on | not reported yet |", summary)
+            self.assertEqual(conclusion, "conclusion=success")
 
     def test_fail_on_is_sent_when_set(self):
         r, _, _, _ = self.hosted(IN_FAIL_ON="miss,noindex")
