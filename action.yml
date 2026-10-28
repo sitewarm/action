@@ -46,7 +46,7 @@ inputs:
     required: false
     default: ''
   api-url:
-    description: "Hosted mode only: base URL of the sitewarm API with the version prefix, for example https://<host>/v1 (https required). Must be empty when mode is local."
+    description: "Hosted mode only: base URL of the sitewarm API with the version prefix, for example https://sitewarm.dev/api/v1 (https required; there is no default, so a key is never sent to a host you did not write down). Must be empty when mode is local."
     required: false
     default: ''
   site:

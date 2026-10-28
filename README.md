@@ -67,7 +67,7 @@ Output: `conclusion` (`success`, `neutral` or `failure`). `run-id`, `hit-ratio` 
       - uses: sitewarm/action@v1
         with:
           mode: hosted
-          api-url: https://<host>/v1
+          api-url: https://sitewarm.dev/api/v1
           api-key: ${{ secrets.SITEWARM_API_KEY }}
           site: www.example.com
 ```
