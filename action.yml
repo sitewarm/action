@@ -30,7 +30,7 @@ inputs:
     required: false
     default: 5xx,noindex,regression
   version:
-    description: sitewarm CLI release to download (without the v).
+    description: sitewarm CLI release to download (without the v). Only versions pinned in this release of the action (with their SHA-256) are accepted; empty means the default.
     required: false
     default: '1.0.2'
   github-token:
@@ -81,6 +81,9 @@ runs:
         VERSION: ${{ inputs.version }}
       run: |
         set -euo pipefail
+        default_version="1.0.2"
+        # An empty value means no override: use the pinned default.
+        [ -n "$VERSION" ] || VERSION="$default_version"
         # The version goes into a URL and a file name: accept only a semantic version (no leading v), never echo the rejected value.
         semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
         if ! [[ "$VERSION" =~ $semver ]]; then
@@ -89,22 +92,25 @@ runs:
         fi
         if [ "$RUNNER_OS" != "Linux" ]; then echo "::error title=sitewarm::This action supports Linux runners only."; exit 1; fi
         case "$RUNNER_ARCH" in X64) arch=amd64;; ARM64) arch=arm64;; *) echo "::error title=sitewarm::Unsupported architecture $RUNNER_ARCH"; exit 1;; esac
+        # Pin table: <version> <arch> <SHA-256 of sitewarm_<version>_linux_<arch>.tar.gz>, independent of this action's tag.
+        # Fail closed: a version that is not listed is never downloaded, because there is nothing authentic to compare it with
+        # (a release's own checksums.txt proves integrity, not authenticity). A new CLI version arrives with a new release of this action.
+        pins='1.0.2 amd64 8daad022e9eed93e435d843f0a9a984c6b70bd00615518571a48c308e5e70abc
+        1.0.2 arm64 a2f5beaec3b6700fd53496b227115c23e7859b003aea1b80e561e03ce803a2fa'
+        want=""
+        while read -r pin_version pin_arch pin_sha; do
+          if [ "$pin_version" = "$VERSION" ] && [ "$pin_arch" = "$arch" ]; then want="$pin_sha"; fi
+        done <<< "$pins"
+        if [ -z "$want" ]; then
+          listed=$(printf '%s\n' "$pins" | cut -d' ' -f1 | sort -u | paste -sd, -)
+          echo "::error title=sitewarm::version $VERSION is not pinned in this release of the action (pinned: $listed). The action never downloads a CLI it has no SHA-256 for; use the default or a newer release of the action."
+          exit 1
+        fi
         base="https://github.com/sitewarm/sitewarm/releases/download/v${VERSION}"
         name="sitewarm_${VERSION}_linux_${arch}.tar.gz"
         dir="$RUNNER_TEMP/sitewarm-cli"; mkdir -p "$dir"
         curl -fsSL --retry 3 -o "$dir/$name" "$base/$name"
-        # Engine version and its SHA-256 are pinned here, independent of this action's tag.
-        pinned_version="1.0.2"
-        pinned_amd64="8daad022e9eed93e435d843f0a9a984c6b70bd00615518571a48c308e5e70abc"
-        pinned_arm64="a2f5beaec3b6700fd53496b227115c23e7859b003aea1b80e561e03ce803a2fa"
-        if [ "$VERSION" = "$pinned_version" ]; then
-          want="$pinned_amd64"; [ "$arch" = "arm64" ] && want="$pinned_arm64"
-          echo "$want  $name" > "$dir/expected.sha256"
-        else
-          # Overridden version: no pin to compare, use the release's own checksums file.
-          curl -fsSL --retry 3 -o "$dir/checksums.txt" "$base/checksums.txt"
-          grep -F "  $name" "$dir/checksums.txt" > "$dir/expected.sha256"
-        fi
+        echo "$want  $name" > "$dir/expected.sha256"
         (cd "$dir" && sha256sum -c expected.sha256)
         tar -xzf "$dir/$name" -C "$dir" sitewarm
         "$dir/sitewarm" --version || true
