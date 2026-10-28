@@ -1,8 +1,8 @@
 {
- "Decide whether to run": "84079a6e4e51e5ee681e293ffa7eb688a00f5ff32c1f171ac1d68af515390abb",
- "Download and verify the sitewarm CLI": "12f4e7440775bb3f869358d0a840d60384efd517ebc0f8fa7e41c51213d0054c",
- "Read the previous Production receipt": "f4d9a92e10aaf0a36aec07f23832dd7350d63b705a89d5ed6b11849b468a1577",
- "Scan": "4207946a1c699b51e759a5176f71e41d62ec477fffa9727a43ac93f2666bad2f",
- "Build the verdict": "978ff26d33deb9ddaa0d0f9b4b383fa8fc57e427d681afa91e3c91ce1686a4af",
- "Publish the Check": "ebffab042053459775751ad20f27b634cf3c8d9c08f94caf2af64500983fbfe2"
+  "Decide whether to run": "84079a6e4e51e5ee681e293ffa7eb688a00f5ff32c1f171ac1d68af515390abb",
+  "Download and verify the sitewarm CLI": "3bc89396ba4fa19ec2afaac536d2d5565752977569288c385ae14d08898e3bbd",
+  "Read the previous Production receipt": "f4d9a92e10aaf0a36aec07f23832dd7350d63b705a89d5ed6b11849b468a1577",
+  "Scan": "4207946a1c699b51e759a5176f71e41d62ec477fffa9727a43ac93f2666bad2f",
+  "Build the verdict": "978ff26d33deb9ddaa0d0f9b4b383fa8fc57e427d681afa91e3c91ce1686a4af",
+  "Publish the Check": "ebffab042053459775751ad20f27b634cf3c8d9c08f94caf2af64500983fbfe2"
 }
