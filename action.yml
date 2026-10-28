@@ -426,17 +426,17 @@ runs:
       if: steps.validate.outputs.mode == 'hosted'
       shell: bash
       env:
-        SITEWARM_API_KEY: ${{ inputs.api-key }}
-        SITEWARM_API_URL: ${{ inputs.api-url }}
-        SITEWARM_SITE: ${{ inputs.site }}
-        SITEWARM_SITEMAP_URL: ${{ inputs.sitemap-url }}
-        SITEWARM_WAIT: ${{ inputs.wait }}
-        SITEWARM_TIMEOUT: ${{ inputs.timeout }}
-        SITEWARM_FAIL_ON: ${{ inputs.fail-on }}
-        SITEWARM_SITE_TOKEN: ${{ inputs.site-token }}
+        SITEWARM_ACTION_INPUT_API_KEY: ${{ inputs.api-key }}
+        SITEWARM_ACTION_INPUT_API_URL: ${{ inputs.api-url }}
+        SITEWARM_ACTION_INPUT_SITE: ${{ inputs.site }}
+        SITEWARM_ACTION_INPUT_SITEMAP_URL: ${{ inputs.sitemap-url }}
+        SITEWARM_ACTION_INPUT_WAIT: ${{ inputs.wait }}
+        SITEWARM_ACTION_INPUT_TIMEOUT: ${{ inputs.timeout }}
+        SITEWARM_ACTION_INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        SITEWARM_ACTION_INPUT_SITE_TOKEN: ${{ inputs.site-token }}
       run: |
         set -euo pipefail
-        # The bundle reads these SITEWARM_* variables; the key stays in the environment and is never on a command line.
+        # The bundle reads these SITEWARM_ACTION_INPUT_* variables (a prefix no CLI or doc uses, so an ambient SITEWARM_API_URL cannot stand in for an empty input); the key stays in the environment and is never on a command line.
         exec node "$GITHUB_ACTION_PATH/hosted/index.js"
 
     - name: Set the hosted conclusion
