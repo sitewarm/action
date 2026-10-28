@@ -108,7 +108,6 @@ runs:
         if [ -n "$SITE_TOKEN" ]; then fail "site-token is not available yet. Use mode: hosted with api-key, or mode: local."; fi
         case "$MODE" in
           local)
-            if [ -z "$SITE_URL" ]; then fail "site-url is required when mode is local."; fi
             for pair in "api-key:$API_KEY" "api-url:$API_URL" "site:$SITE" "wait:$WAIT" "timeout:$TIMEOUT"; do
               if [ -n "${pair#*:}" ]; then fail "${pair%%:*} is only for mode: hosted, but mode is local. Remove it, or set mode: hosted."; fi
             done
@@ -159,6 +158,16 @@ runs:
           echo "::notice title=sitewarm::Skipped on pull request events. Run this action after a Production deploy."
         fi
         { echo "run=$run"; echo "sha=$sha"; echo "environment=$env_name"; } >> "$GITHUB_OUTPUT"
+
+    - name: Require site-url (local)
+      if: steps.validate.outputs.mode == 'local' && steps.guard.outputs.run == 'true'
+      shell: bash
+      env:
+        SITE_URL: ${{ inputs.site-url }}
+      run: |
+        set -euo pipefail
+        # Checked here, after the guard, so events the guard skips behave as in v1.0.1.
+        if [ -z "$SITE_URL" ]; then echo "::error title=sitewarm::site-url is required when mode is local."; exit 1; fi
 
     - name: Download and verify the sitewarm CLI
       if: steps.validate.outputs.mode == 'local' && steps.guard.outputs.run == 'true'
@@ -417,19 +426,18 @@ runs:
       if: steps.validate.outputs.mode == 'hosted'
       shell: bash
       env:
-        IN_API_KEY: ${{ inputs.api-key }}
-        IN_API_URL: ${{ inputs.api-url }}
-        IN_SITE: ${{ inputs.site }}
-        IN_SITEMAP_URL: ${{ inputs.sitemap-url }}
-        IN_WAIT: ${{ inputs.wait }}
-        IN_TIMEOUT: ${{ inputs.timeout }}
-        IN_FAIL_ON: ${{ inputs.fail-on }}
+        SITEWARM_API_KEY: ${{ inputs.api-key }}
+        SITEWARM_API_URL: ${{ inputs.api-url }}
+        SITEWARM_SITE: ${{ inputs.site }}
+        SITEWARM_SITEMAP_URL: ${{ inputs.sitemap-url }}
+        SITEWARM_WAIT: ${{ inputs.wait }}
+        SITEWARM_TIMEOUT: ${{ inputs.timeout }}
+        SITEWARM_FAIL_ON: ${{ inputs.fail-on }}
+        SITEWARM_SITE_TOKEN: ${{ inputs.site-token }}
       run: |
         set -euo pipefail
-        # The bundle reads INPUT_<NAME> variables, whose names contain hyphens; `env` can set them, bash assignments cannot.
-        exec env "INPUT_API-KEY=$IN_API_KEY" "INPUT_API-URL=$IN_API_URL" "INPUT_SITE=$IN_SITE" "INPUT_SITEMAP-URL=$IN_SITEMAP_URL" \
-          "INPUT_WAIT=$IN_WAIT" "INPUT_TIMEOUT=$IN_TIMEOUT" "INPUT_FAIL-ON=$IN_FAIL_ON" \
-          node "$GITHUB_ACTION_PATH/hosted/index.js"
+        # The bundle reads these SITEWARM_* variables; the key stays in the environment and is never on a command line.
+        exec node "$GITHUB_ACTION_PATH/hosted/index.js"
 
     - name: Set the hosted conclusion
       id: hosted_conclusion

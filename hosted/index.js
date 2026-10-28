@@ -432,7 +432,8 @@ var import_node_crypto = require("node:crypto");
 var escapeData = (s) => s.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
 var escapeProperty = (s) => escapeData(s).replace(/:/g, "%3A").replace(/,/g, "%2C");
 function getInput(io, name) {
-  return (io.env[`INPUT_${name.replace(/ /g, "_").toUpperCase()}`] ?? "").trim();
+  const upper = name.replace(/ /g, "_").toUpperCase();
+  return (io.env[`INPUT_${upper}`] ?? io.env[`SITEWARM_${upper.replace(/-/g, "_")}`] ?? "").trim();
 }
 function addMask(io, secret) {
   if (secret) io.out(`::add-mask::${escapeData(secret)}`);

@@ -29,6 +29,7 @@ HAVE_NODE = shutil.which("node") is not None
 LOCAL_STEPS = ["Decide whether to run", "Download and verify the sitewarm CLI", "Read the previous Production receipt", "Scan", "Build the verdict", "Publish the Check"]
 VALIDATE = "Validate the inputs"
 HOSTED = "Warm and verify (hosted)"
+REQUIRE = "Require site-url (local)"
 CONCLUSION = "Set the hosted conclusion"
 
 
@@ -59,6 +60,7 @@ class StepsAreGatedByMode(unittest.TestCase):
         b = self.blocks()
         order = [m.group(1) for m in re.finditer(r"^    - name: (.+)$", pathlib.Path(ACTION).read_text(), re.M)]
         self.assertEqual(order[0], VALIDATE)
+        self.assertEqual(order.index(REQUIRE), order.index("Decide whether to run") + 1)
         self.assertNotIn("if:", b[VALIDATE])
         for n in LOCAL_STEPS:
             self.assertIn("steps.validate.outputs.mode == 'local'", b[n], n)
@@ -73,7 +75,7 @@ class StepsAreGatedByMode(unittest.TestCase):
     def test_exact_conditions_and_outputs(self):
         text = pathlib.Path(ACTION).read_text()
         b = self.blocks()
-        for n in LOCAL_STEPS[1:]:
+        for n in LOCAL_STEPS[1:] + [REQUIRE]:
             self.assertRegex(b[n], r"\n      if: steps\.validate\.outputs\.mode == 'local' && steps\.guard\.outputs\.run == 'true'\n", n)
         self.assertRegex(b["Decide whether to run"], r"\n      if: steps\.validate\.outputs\.mode == 'local'\n")
         self.assertRegex(b[HOSTED], r"\n      if: steps\.validate\.outputs\.mode == 'hosted'\n")
@@ -81,7 +83,7 @@ class StepsAreGatedByMode(unittest.TestCase):
         self.assertIn("value: ${{ steps.render.outputs.conclusion || steps.hosted_conclusion.outputs.conclusion }}", text)
         for o in ("run-id", "hit-ratio", "report-url"):
             self.assertIn("value: ${{ steps.hosted.outputs.%s }}" % o, text)
-        for k, i in (("IN_API_KEY", "api-key"), ("IN_API_URL", "api-url"), ("IN_SITE", "site"), ("IN_WAIT", "wait"), ("IN_FAIL_ON", "fail-on")):
+        for k, i in (("SITEWARM_API_KEY", "api-key"), ("SITEWARM_API_URL", "api-url"), ("SITEWARM_SITE", "site"), ("SITEWARM_WAIT", "wait"), ("SITEWARM_FAIL_ON", "fail-on")):
             self.assertIn("        %s: ${{ inputs.%s }}\n" % (k, i), b[HOSTED])
 
     def test_the_bundle_is_the_one_provenance_names(self):
@@ -99,6 +101,13 @@ class StepsAreGatedByMode(unittest.TestCase):
         run_body = step_script(ACTION, HOSTED)
         self.assertNotIn("${{", run_body)
         self.assertNotIn("inputs.", run_body)
+        self.assertNotRegex(run_body, r"SITEWARM_API_KEY|SITEWARM_SITE_TOKEN|\benv\b")  # not even named in the script: no expansion, no launcher
+        names = re.findall(r"^    - name: (.+)$", pathlib.Path(ACTION).read_text(), re.M)
+        for n in names:
+            self.assertNotIn("${{", step_script(ACTION, n), n)  # every input reaches a script through env: only
+        block = self.blocks()[HOSTED]
+        self.assertIn("        SITEWARM_API_KEY: ${{ inputs.api-key }}\n", block)
+        self.assertIn("        SITEWARM_SITE_TOKEN: ${{ inputs.site-token }}\n", block)
 
 
 class LocalModeVerdictIsUnchanged(unittest.TestCase):
@@ -126,10 +135,23 @@ class ValidateInputs(unittest.TestCase):
             self.assertIn("mode must be local or hosted", out)
             self.assertNotIn("mode=", gho)
 
-    def test_local_requires_site_url(self):
-        rc, out, _ = validate(mode="local")
-        self.assertNotEqual(rc, 0)
-        self.assertIn("site-url is required", out)
+    def test_local_requires_site_url_only_after_the_guard_lets_the_run_go_ahead(self):
+        # Parity with v1.0.1: an event the guard skips must not fail on an empty site-url.
+        rc, _, gho = validate(mode="local")
+        self.assertEqual(rc, 0)
+        self.assertIn("mode=local", gho)
+        out = pathlib.Path(tempfile.mkdtemp()) / "gho"
+        out.write_text("")
+        g = bash(step_script(ACTION, "Decide whether to run"), {"WANT_ENV": "production", "GITHUB_SHA": "abc", "GITHUB_EVENT_NAME": "pull_request", "GITHUB_OUTPUT": str(out)})
+        self.assertEqual(g.returncode, 0)
+        self.assertIn("run=false", out.read_text())  # so the step below is skipped by its if:
+        text = pathlib.Path(ACTION).read_text()
+        self.assertRegex(text, r"- name: Require site-url \(local\)\n      if: steps\.validate\.outputs\.mode == 'local' && steps\.guard\.outputs\.run == 'true'\n")
+        # and when it does run, an empty site-url fails clearly while a set one passes
+        r = bash(step_script(ACTION, REQUIRE), {"SITE_URL": ""})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("site-url is required when mode is local", r.stdout)
+        self.assertEqual(bash(step_script(ACTION, REQUIRE), {"SITE_URL": "https://example.com"}).returncode, 0)
 
     def test_local_rejects_each_hosted_input(self):
         for name, v in (("api_key", KEY), ("api_url", "https://x.test/v1"), ("site", "example.com"), ("wait", "true"), ("timeout", "5m")):
@@ -262,14 +284,20 @@ class HostedAgainstAFakeServer(unittest.TestCase):
         gho, summary = tmp / "gho", tmp / "summary.md"
         gho.write_text("")
         summary.write_text("")
-        env = {"IN_API_KEY": KEY, "IN_API_URL": f"http://127.0.0.1:{self.port}/v1", "IN_SITE": "example.com", "IN_SITEMAP_URL": "", "IN_WAIT": "", "IN_TIMEOUT": "", "IN_FAIL_ON": "",
+        shim = tmp / "bin"
+        shim.mkdir()
+        argv_log = tmp / "argv.log"
+        (shim / "node").write_text('#!/bin/sh\necho "node $*" >> "$ARGV_LOG"\nexec "$REAL_NODE" "$@"\n')
+        (shim / "node").chmod(0o755)
+        self.argv_log = argv_log
+        env = {"PATH": f"{shim}:{os.environ['PATH']}", "ARGV_LOG": str(argv_log), "REAL_NODE": shutil.which("node"), "SITEWARM_API_KEY": KEY, "SITEWARM_API_URL": f"http://127.0.0.1:{self.port}/v1", "SITEWARM_SITE": "example.com", "SITEWARM_SITEMAP_URL": "", "SITEWARM_WAIT": "", "SITEWARM_TIMEOUT": "", "SITEWARM_FAIL_ON": "",
                "GITHUB_ACTION_PATH": str(ROOT), "GITHUB_OUTPUT": str(gho), "GITHUB_STEP_SUMMARY": str(summary), "GITHUB_REPOSITORY": "acme/web", "GITHUB_RUN_ID": "42",
                "GITHUB_RUN_ATTEMPT": "1", "GITHUB_SHA": "0123abcd", "GITHUB_JOB": "deploy", "GITHUB_ACTION": "__run",
                "HTTPS_PROXY": "http://127.0.0.1:9", "HTTP_PROXY": "http://127.0.0.1:9", "NO_PROXY": "127.0.0.1"}
         env.update(over)
         r = bash(step_script(ACTION, HOSTED), env)
         outputs = {m[0]: m[2] for m in re.findall(r"^([\w-]+)<<(\S+)\n([^\n]*)\n\2$", gho.read_text(), re.M)}
-        c = bash(step_script(ACTION, CONCLUSION), {"OUTCOME": "success" if r.returncode == 0 else "failure", "WAIT": env["IN_WAIT"], "GITHUB_OUTPUT": str(tmp / "c")})
+        c = bash(step_script(ACTION, CONCLUSION), {"OUTCOME": "success" if r.returncode == 0 else "failure", "WAIT": env["SITEWARM_WAIT"], "GITHUB_OUTPUT": str(tmp / "c")})
         conclusion = (tmp / "c").read_text().strip() if (tmp / "c").exists() else ""
         return r, outputs, summary.read_text(), conclusion
 
@@ -289,6 +317,9 @@ class HostedAgainstAFakeServer(unittest.TestCase):
         self.assertEqual(post["body"]["source"], {"type": "sitemap", "sitemap_id": "sm_1"})
         self.assertNotIn("options", post["body"])  # fail-on unset: the service default applies
         self.assertEqual([l for l in (r.stdout + r.stderr).splitlines() if KEY in l], [f"::add-mask::{KEY}"])
+        argv = self.argv_log.read_text()
+        self.assertIn("hosted/index.js", argv)  # the shim really saw the launch
+        self.assertNotIn(KEY, argv)  # the key is never an argument of the process that receives it
 
     def test_a_run_without_options_fail_on_still_passes_and_says_not_reported(self):
         # The API contract is a list or null; the first bundle crashed the summary on a missing field (fixed in 3d3f939).
@@ -300,7 +331,7 @@ class HostedAgainstAFakeServer(unittest.TestCase):
             self.assertEqual(conclusion, "conclusion=success")
 
     def test_fail_on_is_sent_when_set(self):
-        r, _, _, _ = self.hosted(IN_FAIL_ON="miss,noindex")
+        r, _, _, _ = self.hosted(SITEWARM_FAIL_ON="miss,noindex")
         self.assertEqual(r.returncode, 0, r.stdout)
         post = next(c for c in FakeApi.log if c["method"] == "POST")
         self.assertEqual(post["body"]["options"], {"fail_on": ["miss", "noindex"]})
@@ -313,7 +344,7 @@ class HostedAgainstAFakeServer(unittest.TestCase):
         self.assertEqual(outputs.get("run-id"), "run_1")
 
     def test_wait_false_only_starts_the_run_and_is_neutral(self):
-        r, outputs, _, _ = self.hosted(IN_WAIT="false")
+        r, outputs, _, _ = self.hosted(SITEWARM_WAIT="false")
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertEqual(outputs.get("hit-ratio"), "")
         self.assertFalse(any(c["path"] == "/v1/warm-runs/run_1" for c in FakeApi.log))
@@ -329,7 +360,7 @@ class HostedAgainstAFakeServer(unittest.TestCase):
         self.assertEqual([l for l in (r.stdout + r.stderr).splitlines() if KEY in l], [f"::add-mask::{KEY}"])
 
     def test_a_plain_http_non_loopback_url_is_refused_before_any_request(self):
-        r, _, _, _ = self.hosted(IN_API_URL="http://api.example.test/v1")
+        r, _, _, _ = self.hosted(SITEWARM_API_URL="http://api.example.test/v1")
         self.assertEqual(r.returncode, 1)
         self.assertEqual(FakeApi.log, [])
 
