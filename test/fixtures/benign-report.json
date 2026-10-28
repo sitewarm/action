@@ -1,0 +1,48 @@
+{
+ "results": [
+  {
+   "url": "https://example.com/",
+   "profile": "",
+   "state": "hit",
+   "http_status": 200,
+   "indexability": "indexable",
+   "pop": "AMS",
+   "cache_control": "public, s-maxage=300"
+  },
+  {
+   "url": "https://example.com/about",
+   "profile": "mobile",
+   "state": "miss",
+   "http_status": 200,
+   "indexability": "indexable",
+   "pop": "AMS",
+   "cache_control": "no-store"
+  },
+  {
+   "url": "https://example.com/blog?a=1|2",
+   "profile": "",
+   "state": "error",
+   "http_status": 503,
+   "indexability": null,
+   "pop": "AMS"
+  },
+  {
+   "url": "https://example.com/draft",
+   "profile": "",
+   "state": "hit",
+   "http_status": 200,
+   "indexability": "noindex",
+   "indexability_detail": "x-robots-tag",
+   "pop": "AMS"
+  },
+  {
+   "url": "https://example.com/cookie",
+   "profile": "",
+   "state": "miss",
+   "http_status": 200,
+   "indexability": "indexable",
+   "set_cookie": true,
+   "pop": "AMS"
+  }
+ ]
+}

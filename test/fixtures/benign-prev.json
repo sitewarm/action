@@ -1,0 +1,26 @@
+[
+ {
+  "k": "https://example.com/about|mobile",
+  "u": "https://example.com/about",
+  "pf": "mobile",
+  "s": "hit",
+  "h": 200,
+  "i": "indexable"
+ },
+ {
+  "k": "https://example.com/blog?a=1|2|",
+  "u": "https://example.com/blog?a=1|2",
+  "pf": "",
+  "s": "hit",
+  "h": 200,
+  "i": "indexable"
+ },
+ {
+  "k": "https://example.com/cookie|",
+  "u": "https://example.com/cookie",
+  "pf": "",
+  "s": "error",
+  "h": 500,
+  "i": null
+ }
+]

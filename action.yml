@@ -81,6 +81,12 @@ runs:
         VERSION: ${{ inputs.version }}
       run: |
         set -euo pipefail
+        # The version goes into a URL and a file name: accept only a semantic version (no leading v), never echo the rejected value.
+        semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+        if ! [[ "$VERSION" =~ $semver ]]; then
+          echo "::error title=sitewarm::version must be a semantic version such as 1.0.2 or 1.1.0-rc.1, without a leading v. Leave it unset to use the default."
+          exit 1
+        fi
         if [ "$RUNNER_OS" != "Linux" ]; then echo "::error title=sitewarm::This action supports Linux runners only."; exit 1; fi
         case "$RUNNER_ARCH" in X64) arch=amd64;; ARM64) arch=arm64;; *) echo "::error title=sitewarm::Unsupported architecture $RUNNER_ARCH"; exit 1;; esac
         base="https://github.com/sitewarm/sitewarm/releases/download/v${VERSION}"
@@ -191,7 +197,12 @@ runs:
 
         jq -r --argjson havePrev "$HAVE_PREV" --arg failOn "$FAIL_ON" --arg site "$SITE_URL" --arg sha "$SHA" \
            --slurpfile prev "$PREV_JSON" --slurpfile rep "$REPORT" --arg out "$OUT" '
-          def esc: if . == null then "" else (tostring | gsub("\\|"; "\\|") | gsub("\n"; " ")) end;
+          # Report fields come from the scanned site and its CDN. Neutralize Markdown and HTML before they reach the Check.
+          def oneline: if . == null then "" else (tostring | gsub("[\r\n]+"; " ")) end;
+          def esc: oneline | gsub("\\\\"; "\\\\") | gsub("&"; "&amp;") | gsub("\\|"; "\\|") | gsub("\\["; "\\[") | gsub("\\]"; "\\]") | gsub("<"; "&lt;") | gsub(">"; "&gt;") | gsub("@"; "&#64;") | gsub("`"; "\\`");
+          # Inside a code span everything is literal; only the backtick (which would end the span) is replaced.
+          def code: oneline | gsub("`"; "\u0027");
+          def tcode: code | gsub("\\|"; "\\|");
           def path: (. | sub("^https?://[^/]+"; "") | if . == "" then "/" else . end);
           def lbl: ((.u | path) + (if .pf != "" then " (" + .pf + ")" else "" end));
           def skipped: (.s == "skipped-robots" or .s == "incomplete");
@@ -244,7 +255,7 @@ runs:
              elif ($ver | all(.s == "hit")) then "success" else "neutral" end) as $concl
           | ($cur | map(select(.s == "hit")) | length) as $nhit
           | ($cur | map(.p) | map(select(. != null)) | unique | join(", ")) as $pops
-          | (if $pops == "" then "PoP not reported by the CDN" else "PoP " + $pops end) as $popcopy
+          | (if $pops == "" then "PoP not reported by the CDN" else "PoP " + ($pops | esc) end) as $popcopy
           | ($cur | map(select((isok | not) and (skipped | not) or skipped))) as $problems
           | ($problems | length) as $np
           | ($problems[0:50]) as $shown
@@ -258,7 +269,7 @@ runs:
                          elif ($ver | length) == 0 then "Nothing could be verified" else "No regression; some URLs are not served from cache" end) + "**"
                 + (if $cc == "neutral" and ($ver | length) == 0 then " (the list, robots.txt or the run prevented any verification; this is not a regression)" else "" end)
                 + "\n\nMeasured from the GitHub Actions runner (" + $popcopy + "). Only that PoP was checked; other PoPs were not."
-                + (if $site != "" then "\nSite: " + $site else "" end) + (if $sha != "" then "\nCommit: `" + $sha[0:12] + "`" else "" end)
+                + (if $site != "" then "\nSite: " + ($site | esc) else "" end) + (if $sha != "" then "\nCommit: `" + $sha[0:12] + "`" else "" end)
                 + "\n\n| HIT | MISS | Other cache states | Errors (5xx, timeout) | noindex | Not checked |\n|---|---|---|---|---|---|\n| "
                 + ($nhit | tostring) + " | " + ($nmiss | tostring) + " | "
                 + (($cur | map(select(.s != "hit" and .s != "miss" and (skipped | not) and (err | not))) | length) | tostring) + " | "
@@ -268,14 +279,14 @@ runs:
                 + (if ($havePrev | not) then "First run for this environment: this is the baseline, nothing to compare."
                    elif ($reg | length) == 0 and ($rec | length) == 0 then "No change in HIT, errors or noindex."
                    else
-                     (if ($reg | length) > 0 then "**Regressions**\n" + ($reg | map("- `" + lbl + "`: " + .kind) | join("\n")) + "\n" else "" end)
-                     + (if ($rec | length) > 0 then "\n**Recovered**\n" + ($rec | map("- `" + lbl + "`") | join("\n")) + "\n" else "" end)
+                     (if ($reg | length) > 0 then "**Regressions**\n" + ($reg | map("- `" + (lbl | code) + "`: " + (.kind | esc)) | join("\n")) + "\n" else "" end)
+                     + (if ($rec | length) > 0 then "\n**Recovered**\n" + ($rec | map("- `" + (lbl | code) + "`") | join("\n")) + "\n" else "" end)
                    end)
                 + (if $np == 0 then "" else
                     "\n\n### URLs to look at\n\n| URL | State | Status | Cause | Fix |\n|---|---|---|---|---|\n"
-                    + ($shown | map("| `" + (lbl | esc) + "` | " + (.s | esc) + " | " + (.h | esc) + " | " + (cause.c | esc) + " | " + (cause.f | esc) + " |") | join("\n"))
+                    + ($shown | map("| `" + (lbl | tcode) + "` | " + (.s | esc) + " | " + (.h | esc) + " | " + (cause.c | esc) + " | " + (cause.f | esc) + " |") | join("\n"))
                     + (if $np > 50 then "\n\nand " + (($np - 50) | tostring) + " more." else "" end) end)
-                + "\n\nThe verdict follows `fail-on: " + $failOn + "`. MISS alone never turns the Check red (it shows as neutral) unless `miss` is in that list."
+                + "\n\nThe verdict follows `fail-on: " + ($failOn | code) + "`. MISS alone never turns the Check red (it shows as neutral) unless `miss` is in that list."
               )
             }' "$OUT/state.json" > "$OUT/result.json"
 
