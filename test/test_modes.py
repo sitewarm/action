@@ -70,6 +70,24 @@ class StepsAreGatedByMode(unittest.TestCase):
         got = {n: hashlib.sha256(step_script(ACTION, n).encode()).hexdigest() for n in LOCAL_STEPS}
         self.assertEqual(got, want)  # any edit of a local script must be a reviewed change of this fixture
 
+    def test_exact_conditions_and_outputs(self):
+        text = pathlib.Path(ACTION).read_text()
+        b = self.blocks()
+        for n in LOCAL_STEPS[1:]:
+            self.assertRegex(b[n], r"\n      if: steps\.validate\.outputs\.mode == 'local' && steps\.guard\.outputs\.run == 'true'\n", n)
+        self.assertRegex(b["Decide whether to run"], r"\n      if: steps\.validate\.outputs\.mode == 'local'\n")
+        self.assertRegex(b[HOSTED], r"\n      if: steps\.validate\.outputs\.mode == 'hosted'\n")
+        self.assertRegex(b[CONCLUSION], r"\n      if: always\(\) && steps\.validate\.outputs\.mode == 'hosted'\n")
+        self.assertIn("value: ${{ steps.render.outputs.conclusion || steps.hosted_conclusion.outputs.conclusion }}", text)
+        for o in ("run-id", "hit-ratio", "report-url"):
+            self.assertIn("value: ${{ steps.hosted.outputs.%s }}" % o, text)
+        for k, i in (("IN_API_KEY", "api-key"), ("IN_API_URL", "api-url"), ("IN_SITE", "site"), ("IN_WAIT", "wait"), ("IN_FAIL_ON", "fail-on")):
+            self.assertIn("        %s: ${{ inputs.%s }}\n" % (k, i), b[HOSTED])
+
+    def test_the_bundle_is_the_one_provenance_names(self):
+        sha = hashlib.sha256((ROOT / "hosted" / "index.js").read_bytes()).hexdigest()
+        self.assertIn(sha, (ROOT / "hosted" / "PROVENANCE.md").read_text())
+
     def test_defaults(self):
         text = pathlib.Path(ACTION).read_text()
         head = text.split("outputs:")[0]
@@ -120,7 +138,6 @@ class ValidateInputs(unittest.TestCase):
             self.assertIn(name.replace("_", "-") + " is only for mode: hosted", out)
             self.assertNotIn("mode=", gho)
 
-    @unittest.skipUnless(HAVE_NODE, "node is not installed")
     def test_hosted_rejects_each_local_input(self):
         base = dict(mode="hosted", api_key=KEY, api_url="https://x.test/v1", site="example.com")
         for name, v in (("site_url", "https://example.com"), ("urls_file", "u.csv")):
@@ -145,6 +162,27 @@ class ValidateInputs(unittest.TestCase):
         # and it is the mode, not the key, that decides: the same inputs with mode local do not pass as hosted
         rc, _, gho = validate(mode="local", site_url="https://example.com")
         self.assertIn("mode=local", gho)
+
+    def test_wait_accepts_only_what_both_parsers_read_the_same_way(self):
+        base = dict(mode="hosted", api_key=KEY, api_url="https://x.test/v1", site="example.com")
+        for bad in (" false", "false ", "0", "no", "off", "yes", "1"):
+            rc, out, gho = validate(wait=bad, **base)
+            self.assertNotEqual(rc, 0, repr(bad))
+            self.assertIn("wait must be true or false", out)
+            self.assertNotIn("mode=", gho)
+        if HAVE_NODE:
+            for ok in ("", "true", "false", "TRUE", "False"):
+                self.assertEqual(validate(wait=ok, **base)[0], 0, ok)
+
+    def test_the_mask_command_escapes_its_value_and_multiline_credentials_are_refused(self):
+        rc, out, _ = validate(mode="hosted", api_key="a%25b%0Ac", api_url="https://x.test/v1", site="example.com")
+        self.assertEqual(out.splitlines()[0], "::add-mask::a%2525b%250Ac")  # '%' escaped, so the runner masks the real value
+        rc, out, gho = validate(mode="hosted", api_key="x\n::warning::y", api_url="https://x.test/v1", site="example.com")
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(out.splitlines()[0], "::add-mask::x%0A::warning::y")
+        self.assertEqual([l for l in out.splitlines() if l.startswith("::") and not l.startswith(("::add-mask::", "::error title=sitewarm::"))], [])
+        self.assertIn("single line", out)
+        self.assertNotIn("mode=", gho)
 
     def test_site_token_fails_in_both_modes_and_is_never_echoed(self):
         for kw in (dict(mode="local", site_url="https://example.com"), dict(mode="hosted", api_key=KEY, api_url="https://x.test/v1", site="example.com")):

@@ -100,9 +100,11 @@ runs:
       run: |
         set -euo pipefail
         # Mask first, so no later line can print a credential. Messages below name inputs and never echo values.
-        if [ -n "$API_KEY" ]; then echo "::add-mask::$API_KEY"; fi
-        if [ -n "$SITE_TOKEN" ]; then echo "::add-mask::$SITE_TOKEN"; fi
+        mask() { local v="$1"; v="${v//%/%25}"; v="${v//$'\r'/%0D}"; v="${v//$'\n'/%0A}"; echo "::add-mask::$v"; }
+        if [ -n "$API_KEY" ]; then mask "$API_KEY"; fi
+        if [ -n "$SITE_TOKEN" ]; then mask "$SITE_TOKEN"; fi
         fail() { echo "::error title=sitewarm::$1"; exit 1; }
+        case "$API_KEY$SITE_TOKEN" in *$'\n'*|*$'\r'*) fail "api-key and site-token must be a single line." ;; esac
         if [ -n "$SITE_TOKEN" ]; then fail "site-token is not available yet. Use mode: hosted with api-key, or mode: local."; fi
         case "$MODE" in
           local)
@@ -115,12 +117,15 @@ runs:
             if [ -z "$API_KEY" ]; then
               fail "api-key is empty in mode: hosted. Pass it from a secret. Secrets are empty on pull requests from forks; hosted mode never falls back to a local run."
             fi
+            case "$(printf '%s' "$WAIT" | tr '[:upper:]' '[:lower:]')" in ""|true|false) ;; *) fail "wait must be true or false (no spaces)." ;; esac
             if [ -z "$API_URL" ]; then fail "api-url is required when mode is hosted."; fi
             if [ -z "$SITE" ] && [ -z "$SITEMAP_URL" ]; then fail "set site or sitemap-url when mode is hosted."; fi
             for pair in "site-url:$SITE_URL" "urls-file:$URLS_FILE"; do
               if [ -n "${pair#*:}" ]; then fail "${pair%%:*} is only for mode: local, but mode is hosted. Remove it, or set mode: local."; fi
             done
-            if ! command -v node >/dev/null 2>&1; then fail "mode: hosted needs node 20 or later on the runner."; fi
+            if ! command -v node >/dev/null 2>&1 || ! node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 20 ? 0 : 1)'; then
+              fail "mode: hosted needs node 20 or later on the runner."
+            fi
             ;;
           *) fail "mode must be local or hosted." ;;
         esac

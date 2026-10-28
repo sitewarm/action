@@ -72,7 +72,7 @@ Output: `conclusion` (`success`, `neutral` or `failure`). `run-id`, `hit-ratio` 
           site: www.example.com
 ```
 
-Hosted inputs: `api-key`, `api-url` (https), `site` or `sitemap-url`, `wait` (default `true`), `timeout` (default `15m`) and `fail-on` (cache states and `noindex`, or `none`; unset, the service default applies). They must be empty in local mode, and `site-url` and `urls-file` must be empty in hosted mode: a mismatch fails the step before any request. An empty `api-key` fails too, and never turns into a local run; this is what happens on pull requests from forks, where secrets are empty. Use one key per repository with only the scopes `sites:read`, `warm-runs:read` and `warm-runs:write` (plus `cache-reports:read` for `report-url`).
+Hosted inputs: `api-key`, `api-url` (https), `site` or `sitemap-url`, `wait` (default `true`), `timeout` (default `15m`) and `fail-on` (cache states and `noindex`, or `none`; unset, the service default applies). They must be empty in local mode, and `site-url` and `urls-file` must be empty in hosted mode: a mismatch fails the step before any request. `top`, `environment`, `version` and `github-token` have defaults, so they are ignored in hosted mode rather than rejected. `conclusion` is empty when the inputs are rejected (no run happened); the step itself fails. An empty `api-key` fails too, and never turns into a local run; this is what happens on pull requests from forks, where secrets are empty. Use one key per repository with only the scopes `sites:read`, `warm-runs:read` and `warm-runs:write` (plus `cache-reports:read` for `report-url`).
 
 ## What the Check says
 
