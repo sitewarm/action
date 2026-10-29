@@ -553,7 +553,14 @@ async function resolveSource(client, input) {
     throw new InputError(`sitemap-url host does not belong to site ${site.hostname}`);
   }
   const sitemaps = [];
-  for await (const m of client.sitemaps.listAll(site.id)) sitemaps.push(m);
+  try {
+    for await (const m of client.sitemaps.listAll(site.id)) sitemaps.push(m);
+  } catch (err) {
+    if (err instanceof SiteWarmApiError && err.status === 404) {
+      throw new InputError("this sitewarm host does not support sitemaps listing yet (GET /sites/{id}/sitemaps returned 404); check api-url, or try again when the host is updated");
+    }
+    throw err;
+  }
   if (input.sitemapUrl) {
     const want = normalizeUrl(input.sitemapUrl);
     const hit = sitemaps.find((m) => normalizeUrl(m.url) === want);

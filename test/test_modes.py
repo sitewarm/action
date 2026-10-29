@@ -251,6 +251,8 @@ class FakeApi(http.server.BaseHTTPRequestHandler):
             return self._send(s["status"], {"type": "/problems/x", "title": "rejected", "status": s["status"]}, "application/problem+json")
         if path == "/sites":
             return self._send(200, page([{"id": "site_1", "hostname": "example.com", "verification": {"status": "verified"}, "paused": False, "settings": {}, "created_at": "2026-10-01T00:00:00Z"}]))
+        if path == "/sites/site_1/sitemaps" and s.get("sitemaps_status"):
+            return self._send(s["sitemaps_status"], {"type": "/problems/x", "title": "nope", "status": s["sitemaps_status"]}, "application/problem+json")
         if path == "/sites/site_1/sitemaps":
             return self._send(200, page([{"id": "sm_1", "site_id": "site_1", "url": "https://example.com/sitemap.xml", "created_at": "2026-10-01T00:00:00Z"}]))
         run = {"id": "run_1", "site_id": "site_1", "status": "queued", "trigger": {"type": "api"}, "options": s.get("options", {"fail_on": ["miss", "error", "incomplete", "noindex"]}), "outcome": None, "vantage_points": [], "created_at": "2026-10-18T00:00:00Z"}
@@ -282,9 +284,9 @@ class HostedAgainstAFakeServer(unittest.TestCase):
     def tearDownClass(cls):
         cls.server.shutdown()
 
-    def hosted(self, outcome=PASS, status=None, options=None, **over):
+    def hosted(self, outcome=PASS, status=None, options=None, sitemaps_status=None, **over):
         FakeApi.log = []
-        FakeApi.script = {"outcome": outcome, "status": status, **({"options": options} if options is not None else {})}
+        FakeApi.script = {"outcome": outcome, "status": status, "sitemaps_status": sitemaps_status, **({"options": options} if options is not None else {})}
         tmp = pathlib.Path(tempfile.mkdtemp())
         gho, summary = tmp / "gho", tmp / "summary.md"
         gho.write_text("")
@@ -378,6 +380,23 @@ class HostedAgainstAFakeServer(unittest.TestCase):
         self.assertEqual(len([c for c in FakeApi.log if c["method"] == "GET" and c["path"] == "/v1/sites"]), 1)
         self.assertEqual(conclusion, "conclusion=failure")
         self.assertEqual([l for l in (r.stdout + r.stderr).splitlines() if KEY in l], [f"::add-mask::{KEY}"])
+
+    def test_a_host_without_sitemaps_listing_fails_clearly_and_never_prints_the_key(self):
+        r, _, summary, conclusion = self.hosted(sitemaps_status=404)
+        out = r.stdout + r.stderr
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("this sitewarm host does not support sitemaps listing yet", out)
+        self.assertIn("this sitewarm host does not support sitemaps listing yet", summary)
+        self.assertEqual(conclusion, "conclusion=failure")
+        # It stops there: no run is started, and the listing is asked once.
+        self.assertEqual([c for c in FakeApi.log if c["method"] == "POST"], [])
+        self.assertEqual(len([c for c in FakeApi.log if c["path"] == "/v1/sites/site_1/sitemaps"]), 1)
+        for text in (out, summary):
+            self.assertEqual([l for l in text.splitlines() if KEY in l and l != f"::add-mask::{KEY}"], [])
+        # Any other status keeps its own message: a 403 is a missing scope, not a missing route.
+        r, _, _, _ = self.hosted(sitemaps_status=403)
+        self.assertNotIn("does not support sitemaps listing", r.stdout + r.stderr)
+        self.assertIn("lacks a required scope", r.stdout + r.stderr)
 
     def test_a_plain_http_non_loopback_url_is_refused_before_any_request(self):
         r, _, _, _ = self.hosted(SITEWARM_ACTION_INPUT_API_URL="http://api.example.test/v1")

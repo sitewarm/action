@@ -3,7 +3,8 @@
 Bundle of the hosted mode (the former `node24` Action), run by the composite step "Warm and verify (hosted)" with `node`.
 
 - Built from `packages/github-action` of the private sitewarm repo at commit `dd01508` (branch `sitework/open-source-action-hardening`, local and unmerged when this was copied), with `node scripts/check-dist.mjs` reporting that the committed `dist/index.js` equals a fresh build.
-- 32649 bytes, sha256 `5883687b6075fb02f016ff27b31a2b7e350fb1c2ad20820ddad2c20d25ab5e98`.
+- 32649 bytes, sha256 `5883687b6075fb02f016ff27b31a2b7e350fb1c2ad20820ddad2c20d25ab5e98` (the dd01508 build, as copied).
+- **Current file: that build plus one hand patch, 32949 bytes, sha256 `6aa7eaf97046c8b2a9f2bb67d5591fa759bd6f08154c6bc4405617ec4a7e413f`.** The patch is in `resolveSource`: a 404 from `GET /sites/{id}/sitemaps` fails with "this sitewarm host does not support sitemaps listing yet" instead of the generic API error. It is not yet in the private `packages/github-action` source, so until it is mirrored there (or T-E brings the source here) this file no longer equals a fresh build of dd01508, and the `check-dist` statement above holds for the unpatched build only.
 - It is copied, not built here. The source and a rebuild check in this repository are task T-E (spec section 8); until then, replace this file only with a bundle whose provenance is written here.
 - Build target `node20`, format CJS, no network access at install or run time except the calls to `api-url`.
 
