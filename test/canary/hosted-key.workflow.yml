@@ -1,0 +1,89 @@
+# Canary for what the unit tests cannot show: that a real GitHub runner masks the hosted api-key from the Action's
+# own `::add-mask::`, and, with a real key, one end-to-end run against the hosted API. Not active: it lives under
+# test/ so no workflow runs it. To run it, copy it to .github/workflows/ of a scratch repository that holds this
+# Action, pin the checkout and the Action by commit like every other third-party action (spec section 8), and start it
+# by hand (workflow_dispatch).
+#
+# Job `mask` needs no secret and sends no real key: the key is a throwaway string, the API URL is a closed loopback
+# port, so the Action fails fast. The next step (always) prints the key; the runner must show *** for it, which can
+# only be because the Action masked it. Job `verify-log` then downloads the job log and fails if the key appears.
+#
+# Job `real` runs only when the repository secret SITEWARM_API_KEY exists. Create that key for this canary only, with
+# exactly the scopes sites:read, warm-runs:write and warm-runs:read (add cache-reports:read to also get report-url),
+# named github-actions-canary, with a 90-day expiry; scopes cannot be changed later, a 403 insufficient-scope means
+# a new key.
+name: canary-hosted-key
+on:
+  workflow_dispatch:
+    inputs:
+      api-url:
+        description: Base URL of the hosted API, with the version prefix
+        default: https://sitewarm.dev/api/v1
+      site:
+        description: Hostname of a site in the key's organization that has a registered sitemap
+        default: ''
+permissions:
+  contents: read
+  actions: read
+env:
+  CANARY_KEY: sw_canary_${{ github.run_id }}_not_a_secret
+jobs:
+  mask:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@<commit pinned by the founder>
+      - name: The Action fails fast with a throwaway key
+        id: act
+        continue-on-error: true
+        uses: ./
+        with:
+          mode: hosted
+          api-key: ${{ env.CANARY_KEY }}
+          api-url: http://127.0.0.1:9/api/v1
+          site: canary.invalid
+          timeout: 30s
+      - name: The runner must show *** for the key
+        if: always()
+        run: |
+          set -eu
+          echo "key as the runner prints it: $CANARY_KEY"
+          test "${{ steps.act.outcome }}" = "failure"
+  verify-log:
+    needs: mask
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: The key is nowhere in the job log, and *** is where the key was printed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          job_id=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs" --jq '.jobs[] | select(.name == "mask") | .id')
+          gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$job_id/logs" > mask.log
+          if grep -q "$CANARY_KEY" mask.log; then echo "the key is in the log"; exit 1; fi
+          grep -q 'key as the runner prints it: \*\*\*' mask.log || { echo "no *** where the key was printed"; exit 1; }
+          echo "masked as expected"
+  real:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@<commit pinned by the founder>
+      - name: Skip unless the secret exists
+        id: has
+        env:
+          KEY: ${{ secrets.SITEWARM_API_KEY }}
+        run: |
+          if [ -n "$KEY" ]; then echo "present=true" >> "$GITHUB_OUTPUT"; else echo "::notice::SITEWARM_API_KEY is not set; the real-key run is skipped."; fi
+      - name: Warm and verify with a real key
+        id: run
+        if: steps.has.outputs.present == 'true'
+        uses: ./
+        with:
+          mode: hosted
+          api-key: ${{ secrets.SITEWARM_API_KEY }}
+          api-url: ${{ inputs.api-url }}
+          site: ${{ inputs.site }}
+          timeout: 10m
+      - name: Outputs
+        if: steps.has.outputs.present == 'true'
+        run: |
+          echo "conclusion=${{ steps.run.outputs.conclusion }} run-id=${{ steps.run.outputs.run-id }} hit-ratio=${{ steps.run.outputs.hit-ratio }}"
