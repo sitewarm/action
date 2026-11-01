@@ -74,6 +74,44 @@ Output: `conclusion` (`success`, `neutral` or `failure`). `run-id`, `hit-ratio` 
 
 Hosted inputs: `api-key`, `api-url` (https), `site` or `sitemap-url`, `wait` (default `true`), `timeout` (default `15m`) and `fail-on` (cache states and `noindex`, or `none`; unset, the service default applies). They must be empty in local mode, and `site-url` and `urls-file` must be empty in hosted mode: a mismatch fails the step before any request. `top`, `environment`, `version` and `github-token` have defaults, so they are ignored in hosted mode rather than rejected. `conclusion` is empty when the inputs are rejected (no run happened); the step itself fails. An empty `api-key` fails too, and never turns into a local run; this is what happens on pull requests from forks, where secrets are empty. Use one key per repository with only the scopes `sites:read`, `warm-runs:read` and `warm-runs:write` (plus `cache-reports:read` for `report-url`).
 
+### First run in hosted mode
+
+Before the first workflow run, three things must exist in the sitewarm service; the action creates none of them:
+
+1. **A verified site** for the host you want to warm. A run on an unverified site fails once with the service's message and a pointer to verify it; the action never retries and has no "run anyway" input.
+2. **A registered sitemap** on that site. With one sitemap, `site` is enough; with several, set `sitemap-url` to the one you want (it must match a registered sitemap). With none, the step fails and tells you to register one.
+3. **An API key** with only `sites:read`, `warm-runs:read` and `warm-runs:write` (add `cache-reports:read` if you want `report-url`). Store it as the repository secret `SITEWARM_API_KEY`, one key per repository, and pass it as `api-key`. The action masks it before doing anything else and never prints it; do not echo it or put it in a URL.
+
+Then add the step after your deploy (see "Use it" for the triggers). Minimal workflow:
+
+```yaml
+name: warm after deploy
+on:
+  workflow_dispatch:
+jobs:
+  warm:
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - uses: sitewarm/action@v1
+        with:
+          mode: hosted
+          api-url: https://sitewarm.dev/api/v1
+          api-key: ${{ secrets.SITEWARM_API_KEY }}
+          site: www.example.com
+```
+
+`permissions: {}` is enough: hosted mode needs no `GITHUB_TOKEN` scope. The first run is the baseline for your own comparisons; the step fails by the service's verdict (`fail-on`, or the service default when unset) and, with `wait: true`, prints the run id, hit ratio and a job summary.
+
+### In CI
+
+- **Fork pull requests** get no secrets, so `api-key` is empty and the step fails by design instead of running something else. Run the step on `push`, `deployment_status` or `workflow_dispatch`, not on `pull_request`. Never combine `pull_request_target` with a checkout of code from the fork and this key.
+- **Pin the action** by commit SHA in workflows where a moved tag would matter, and let Dependabot update it.
+- **Timeouts:** `timeout` (default `15m`) bounds the wait, not the run. If it is reached, the step fails and the run keeps going on the service; it is not canceled.
+- **Re-runs** of the same attempt replay the first trigger (one idempotency key per repository, run, attempt and job), so "Re-run jobs" does not start a second run.
+- **Failures you may see**, and what to do: `401` check the key; `403` the key lacks one of the scopes above; `409 site-not-verified` verify the site, then re-run; "does not support sitemaps listing yet" the host behind `api-url` is older than the action, check `api-url` or wait for the host to be updated; `report-url` empty with a warning means the host has no report route or the key lacks `cache-reports:read`, and the verdict is unaffected.
+- **A host that is not ready** for hosted mode fails the step with one of the messages above and changes nothing on your site.
+
 ## What the Check says
 
 - **Green:** every checked page is served from cache and nothing got worse.
