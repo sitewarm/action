@@ -1,0 +1,58 @@
+name: canary-empty-env
+description: Prints, for each of the eight variables the hosted step sets, whether the runner exported it when its input is empty. Test fixture, not part of the published Action.
+inputs:
+  api-key:
+    required: false
+    default: ''
+  api-url:
+    required: false
+    default: ''
+  site:
+    required: false
+    default: ''
+  sitemap-url:
+    required: false
+    default: ''
+  wait:
+    required: false
+    default: ''
+  timeout:
+    required: false
+    default: ''
+  fail-on:
+    required: false
+    default: ''
+  site-token:
+    required: false
+    default: ''
+outputs:
+  report:
+    description: JSON object with one entry per variable, each unset, empty or set.
+    value: ${{ steps.report.outputs.report }}
+runs:
+  using: composite
+  steps:
+    - name: Report what the step sees
+      id: report
+      shell: bash
+      env:
+        SITEWARM_ACTION_INPUT_API_KEY: ${{ inputs.api-key }}
+        SITEWARM_ACTION_INPUT_API_URL: ${{ inputs.api-url }}
+        SITEWARM_ACTION_INPUT_SITE: ${{ inputs.site }}
+        SITEWARM_ACTION_INPUT_SITEMAP_URL: ${{ inputs.sitemap-url }}
+        SITEWARM_ACTION_INPUT_WAIT: ${{ inputs.wait }}
+        SITEWARM_ACTION_INPUT_TIMEOUT: ${{ inputs.timeout }}
+        SITEWARM_ACTION_INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        SITEWARM_ACTION_INPUT_SITE_TOKEN: ${{ inputs.site-token }}
+      run: |
+        set -euo pipefail
+        report=$(node -e '
+          const names = ["API_KEY", "API_URL", "SITE", "SITEMAP_URL", "WAIT", "TIMEOUT", "FAIL_ON", "SITE_TOKEN"];
+          const state = (k) => (!(k in process.env) ? "unset" : process.env[k] === "" ? "empty" : "set");
+          const out = {};
+          for (const n of names) out["SITEWARM_ACTION_INPUT_" + n] = state("SITEWARM_ACTION_INPUT_" + n);
+          for (const n of names) out["ambient SITEWARM_" + n] = state("SITEWARM_" + n);
+          process.stdout.write(JSON.stringify(out));
+        ')
+        echo "$report"
+        echo "report=$report" >> "$GITHUB_OUTPUT"

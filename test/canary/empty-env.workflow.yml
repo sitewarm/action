@@ -1,0 +1,42 @@
+# Canary for the one thing the unit tests cannot show: how a real GitHub runner exports an empty step `env:` value
+# and whether an ambient SITEWARM_* variable (job env) reaches the hosted step. Not active: it lives under test/ so
+# no workflow runs it. To run it, copy it to .github/workflows/ of a scratch repository that holds this Action, and
+# pin the checkout by commit like every other third-party action (spec section 8). It needs no secret and makes no
+# network call.
+name: canary-empty-env
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  canary:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      # The names a user could plausibly have set for the CLI or in an earlier step.
+      SITEWARM_API_KEY: ambient-key
+      SITEWARM_API_URL: http://bad.invalid/v1
+      SITEWARM_FAIL_ON: none
+      SITEWARM_SITE: ambient.example
+    steps:
+      - uses: actions/checkout@<commit pinned by the maintainer>
+      - name: Empty inputs
+        id: canary
+        uses: ./test/canary
+      - name: Assert
+        env:
+          REPORT: ${{ steps.canary.outputs.report }}
+        run: |
+          set -eu
+          echo "$REPORT"
+          node -e '
+            const r = JSON.parse(process.env.REPORT);
+            const bad = [];
+            for (const [k, v] of Object.entries(r)) {
+              if (k.startsWith("SITEWARM_ACTION_INPUT_") && v !== "empty") bad.push(k + " is " + v + ", expected empty (the runner must export an empty value as an empty string)");
+            }
+            if (r["ambient SITEWARM_API_URL"] !== "set") bad.push("the ambient variable did not reach the step, so this run proves nothing");
+            if (bad.length) { console.error(bad.join("\n")); process.exit(1); }
+          '

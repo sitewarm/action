@@ -1,0 +1,10 @@
+[
+ {
+  "k": "https://example.com/a`b @user [x](http://evil.test) <img src=x>|",
+  "u": "https://example.com/a`b @user [x](http://evil.test) <img src=x>",
+  "pf": "",
+  "s": "hit",
+  "h": 200,
+  "i": "indexable"
+ }
+]

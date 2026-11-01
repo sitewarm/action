@@ -1,0 +1,23 @@
+{
+ "results": [
+  {
+   "url": "https://example.com/a`b @user [x](http://evil.test) <img src=x>",
+   "profile": "",
+   "state": "miss",
+   "http_status": 200,
+   "indexability": "indexable",
+   "pop": "<script>alert(1)</script>",
+   "cache_control": "no-store <b>x</b> [click](http://evil.test) @everyone | extra `tick",
+   "detail": "d <i>x</i>"
+  },
+  {
+   "url": "https://example.com/n",
+   "profile": "",
+   "state": "hit",
+   "http_status": 200,
+   "indexability": "noindex",
+   "indexability_detail": "[a](http://evil.test) @here <u>",
+   "pop": "AMS"
+  }
+ ]
+}

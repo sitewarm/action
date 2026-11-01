@@ -6,9 +6,13 @@ branding:
   color: orange
 
 inputs:
+  mode:
+    description: "local (default): scan from this runner with the sitewarm CLI and post a GitHub Check. hosted: start a run in the sitewarm service with api-key and wait for its verdict. Never inferred from api-key."
+    required: false
+    default: local
   site-url:
-    description: Origin of the site to check, for example https://www.example.com (no path).
-    required: true
+    description: Origin of the site to check, for example https://www.example.com (no path). Required when mode is local; must be empty when mode is hosted.
+    required: false
   urls-file:
     description: CSV in your repo with a url or path column, most important pages first. If empty, the first URLs of the sitemap are used.
     required: false
@@ -26,28 +30,109 @@ inputs:
     required: false
     default: production
   fail-on:
-    description: Comma list that turns the Check red. Default 5xx,noindex,regression. Add miss to make a MISS red.
+    description: "Comma list that turns the job or Check red. Unset, local mode uses 5xx,noindex,regression (add miss to make a MISS red) and hosted mode sends nothing, so the service default applies. Hosted mode takes cache states and noindex, or none."
     required: false
-    default: 5xx,noindex,regression
+    default: ''
   version:
-    description: sitewarm CLI release to download (without the v).
+    description: sitewarm CLI release to download (without the v). Only versions pinned in this release of the action (with their SHA-256) are accepted; empty means the default.
     required: false
     default: '1.0.2'
   github-token:
     description: Token used to create the Check. Needs checks write, deployments read and contents read.
     required: false
     default: ${{ github.token }}
+  api-key:
+    description: "Hosted mode only: sitewarm API key from a secret. Must be empty when mode is local."
+    required: false
+    default: ''
+  api-url:
+    description: "Hosted mode only: base URL of the sitewarm API with the version prefix, for example https://sitewarm.dev/api/v1 (https required; there is no default, so a key is never sent to a host you did not write down). Must be empty when mode is local."
+    required: false
+    default: ''
+  site:
+    description: "Hosted mode only: hostname or id of the site. Needed unless sitemap-url is set. Must be empty when mode is local."
+    required: false
+    default: ''
+  wait:
+    description: "Hosted mode only: wait for the run and evaluate it (true or false, default true). Must be empty when mode is local."
+    required: false
+    default: ''
+  timeout:
+    description: "Hosted mode only: longest time to wait, such as 90s, 15m or 2h (default 15m). Must be empty when mode is local."
+    required: false
+    default: ''
+  site-token:
+    description: "Not available yet. Setting it fails the step in either mode."
+    required: false
+    default: ''
 
 outputs:
   conclusion:
-    description: success, neutral or failure.
-    value: ${{ steps.render.outputs.conclusion }}
+    description: success, neutral or failure. Local mode, from the Check; hosted mode, from the service verdict (neutral when wait is false).
+    value: ${{ steps.render.outputs.conclusion || steps.hosted_conclusion.outputs.conclusion }}
+  run-id:
+    description: Hosted mode only: id of the warm run. Empty in local mode.
+    value: ${{ steps.hosted.outputs.run-id }}
+  hit-ratio:
+    description: Hosted mode only: fraction of observed results that are hits. Empty in local mode.
+    value: ${{ steps.hosted.outputs.hit-ratio }}
+  report-url:
+    description: Hosted mode only: API URL of the cache status report. Empty in local mode.
+    value: ${{ steps.hosted.outputs.report-url }}
 
 runs:
   using: composite
   steps:
+    - name: Validate the inputs
+      id: validate
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+        SITE_URL: ${{ inputs.site-url }}
+        URLS_FILE: ${{ inputs.urls-file }}
+        API_KEY: ${{ inputs.api-key }}
+        API_URL: ${{ inputs.api-url }}
+        SITE: ${{ inputs.site }}
+        SITEMAP_URL: ${{ inputs.sitemap-url }}
+        WAIT: ${{ inputs.wait }}
+        TIMEOUT: ${{ inputs.timeout }}
+        SITE_TOKEN: ${{ inputs.site-token }}
+      run: |
+        set -euo pipefail
+        # Mask first, so no later line can print a credential. Messages below name inputs and never echo values.
+        mask() { local v="$1"; v="${v//%/%25}"; v="${v//$'\r'/%0D}"; v="${v//$'\n'/%0A}"; echo "::add-mask::$v"; }
+        if [ -n "$API_KEY" ]; then mask "$API_KEY"; fi
+        if [ -n "$SITE_TOKEN" ]; then mask "$SITE_TOKEN"; fi
+        fail() { echo "::error title=sitewarm::$1"; exit 1; }
+        case "$API_KEY$SITE_TOKEN" in *$'\n'*|*$'\r'*) fail "api-key and site-token must be a single line." ;; esac
+        if [ -n "$SITE_TOKEN" ]; then fail "site-token is not available yet. Use mode: hosted with api-key, or mode: local."; fi
+        case "$MODE" in
+          local)
+            for pair in "api-key:$API_KEY" "api-url:$API_URL" "site:$SITE" "wait:$WAIT" "timeout:$TIMEOUT"; do
+              if [ -n "${pair#*:}" ]; then fail "${pair%%:*} is only for mode: hosted, but mode is local. Remove it, or set mode: hosted."; fi
+            done
+            ;;
+          hosted)
+            if [ -z "$API_KEY" ]; then
+              fail "api-key is empty in mode: hosted. Pass it from a secret. Secrets are empty on pull requests from forks; hosted mode never falls back to a local run."
+            fi
+            case "$(printf '%s' "$WAIT" | tr '[:upper:]' '[:lower:]')" in ""|true|false) ;; *) fail "wait must be true or false (no spaces)." ;; esac
+            if [ -z "$API_URL" ]; then fail "api-url is required when mode is hosted."; fi
+            if [ -z "$SITE" ] && [ -z "$SITEMAP_URL" ]; then fail "set site or sitemap-url when mode is hosted."; fi
+            for pair in "site-url:$SITE_URL" "urls-file:$URLS_FILE"; do
+              if [ -n "${pair#*:}" ]; then fail "${pair%%:*} is only for mode: local, but mode is hosted. Remove it, or set mode: local."; fi
+            done
+            if ! command -v node >/dev/null 2>&1 || ! node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 20 ? 0 : 1)'; then
+              fail "mode: hosted needs node 20 or later on the runner."
+            fi
+            ;;
+          *) fail "mode must be local or hosted." ;;
+        esac
+        echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+
     - name: Decide whether to run
       id: guard
+      if: steps.validate.outputs.mode == 'local'
       shell: bash
       env:
         WANT_ENV: ${{ inputs.environment }}
@@ -74,37 +159,59 @@ runs:
         fi
         { echo "run=$run"; echo "sha=$sha"; echo "environment=$env_name"; } >> "$GITHUB_OUTPUT"
 
+    - name: Require site-url (local)
+      if: steps.validate.outputs.mode == 'local' && steps.guard.outputs.run == 'true'
+      shell: bash
+      env:
+        SITE_URL: ${{ inputs.site-url }}
+      run: |
+        set -euo pipefail
+        # Checked here, after the guard, so events the guard skips behave as in v1.0.1.
+        if [ -z "$SITE_URL" ]; then echo "::error title=sitewarm::site-url is required when mode is local."; exit 1; fi
+
     - name: Download and verify the sitewarm CLI
-      if: steps.guard.outputs.run == 'true'
+      if: steps.validate.outputs.mode == 'local' && steps.guard.outputs.run == 'true'
       shell: bash
       env:
         VERSION: ${{ inputs.version }}
       run: |
         set -euo pipefail
+        default_version="1.0.2"
+        # An empty value means no override: use the pinned default.
+        [ -n "$VERSION" ] || VERSION="$default_version"
+        # The version goes into a URL and a file name: accept only a semantic version (no leading v), never echo the rejected value.
+        semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+        if ! [[ "$VERSION" =~ $semver ]]; then
+          echo "::error title=sitewarm::version must be a semantic version such as 1.0.2 or 1.1.0-rc.1, without a leading v. Leave it unset to use the default."
+          exit 1
+        fi
         if [ "$RUNNER_OS" != "Linux" ]; then echo "::error title=sitewarm::This action supports Linux runners only."; exit 1; fi
         case "$RUNNER_ARCH" in X64) arch=amd64;; ARM64) arch=arm64;; *) echo "::error title=sitewarm::Unsupported architecture $RUNNER_ARCH"; exit 1;; esac
+        # Pin table: <version> <arch> <SHA-256 of sitewarm_<version>_linux_<arch>.tar.gz>, independent of this action's tag.
+        # Fail closed: a version that is not listed is never downloaded, because there is nothing authentic to compare it with
+        # (a release's own checksums.txt proves integrity, not authenticity). A new CLI version arrives with a new release of this action.
+        pins='1.0.2 amd64 8daad022e9eed93e435d843f0a9a984c6b70bd00615518571a48c308e5e70abc
+        1.0.2 arm64 a2f5beaec3b6700fd53496b227115c23e7859b003aea1b80e561e03ce803a2fa'
+        want=""
+        while read -r pin_version pin_arch pin_sha; do
+          if [ "$pin_version" = "$VERSION" ] && [ "$pin_arch" = "$arch" ]; then want="$pin_sha"; fi
+        done <<< "$pins"
+        if [ -z "$want" ]; then
+          listed=$(printf '%s\n' "$pins" | cut -d' ' -f1 | sort -u | paste -sd, -)
+          echo "::error title=sitewarm::version $VERSION is not pinned in this release of the action (pinned: $listed). The action never downloads a CLI it has no SHA-256 for; use the default or a newer release of the action."
+          exit 1
+        fi
         base="https://github.com/sitewarm/sitewarm/releases/download/v${VERSION}"
         name="sitewarm_${VERSION}_linux_${arch}.tar.gz"
         dir="$RUNNER_TEMP/sitewarm-cli"; mkdir -p "$dir"
         curl -fsSL --retry 3 -o "$dir/$name" "$base/$name"
-        # Engine version and its SHA-256 are pinned here, independent of this action's tag.
-        pinned_version="1.0.2"
-        pinned_amd64="8daad022e9eed93e435d843f0a9a984c6b70bd00615518571a48c308e5e70abc"
-        pinned_arm64="a2f5beaec3b6700fd53496b227115c23e7859b003aea1b80e561e03ce803a2fa"
-        if [ "$VERSION" = "$pinned_version" ]; then
-          want="$pinned_amd64"; [ "$arch" = "arm64" ] && want="$pinned_arm64"
-          echo "$want  $name" > "$dir/expected.sha256"
-        else
-          # Overridden version: no pin to compare, use the release's own checksums file.
-          curl -fsSL --retry 3 -o "$dir/checksums.txt" "$base/checksums.txt"
-          grep -F "  $name" "$dir/checksums.txt" > "$dir/expected.sha256"
-        fi
+        echo "$want  $name" > "$dir/expected.sha256"
         (cd "$dir" && sha256sum -c expected.sha256)
         tar -xzf "$dir/$name" -C "$dir" sitewarm
         "$dir/sitewarm" --version || true
 
     - name: Read the previous Production receipt
-      if: steps.guard.outputs.run == 'true'
+      if: steps.validate.outputs.mode == 'local' && steps.guard.outputs.run == 'true'
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}
@@ -127,7 +234,7 @@ runs:
         [ -s "$out" ] && echo "Found the previous receipt." || echo "No previous receipt: this run is the baseline."
 
     - name: Scan
-      if: steps.guard.outputs.run == 'true'
+      if: steps.validate.outputs.mode == 'local' && steps.guard.outputs.run == 'true'
       id: scan
       shell: bash
       env:
@@ -155,7 +262,7 @@ runs:
         echo "report=$report" >> "$GITHUB_OUTPUT"
 
     - name: Build the verdict
-      if: steps.guard.outputs.run == 'true'
+      if: steps.validate.outputs.mode == 'local' && steps.guard.outputs.run == 'true'
       id: render
       shell: bash
       env:
@@ -191,7 +298,12 @@ runs:
 
         jq -r --argjson havePrev "$HAVE_PREV" --arg failOn "$FAIL_ON" --arg site "$SITE_URL" --arg sha "$SHA" \
            --slurpfile prev "$PREV_JSON" --slurpfile rep "$REPORT" --arg out "$OUT" '
-          def esc: if . == null then "" else (tostring | gsub("\\|"; "\\|") | gsub("\n"; " ")) end;
+          # Report fields come from the scanned site and its CDN. Neutralize Markdown and HTML before they reach the Check.
+          def oneline: if . == null then "" else (tostring | gsub("[\r\n]+"; " ")) end;
+          def esc: oneline | gsub("\\\\"; "\\\\") | gsub("&"; "&amp;") | gsub("\\|"; "\\|") | gsub("\\["; "\\[") | gsub("\\]"; "\\]") | gsub("<"; "&lt;") | gsub(">"; "&gt;") | gsub("@"; "&#64;") | gsub("`"; "\\`");
+          # Inside a code span everything is literal; only the backtick (which would end the span) is replaced.
+          def code: oneline | gsub("`"; "\u0027");
+          def tcode: code | gsub("\\|"; "\\|");
           def path: (. | sub("^https?://[^/]+"; "") | if . == "" then "/" else . end);
           def lbl: ((.u | path) + (if .pf != "" then " (" + .pf + ")" else "" end));
           def skipped: (.s == "skipped-robots" or .s == "incomplete");
@@ -244,7 +356,7 @@ runs:
              elif ($ver | all(.s == "hit")) then "success" else "neutral" end) as $concl
           | ($cur | map(select(.s == "hit")) | length) as $nhit
           | ($cur | map(.p) | map(select(. != null)) | unique | join(", ")) as $pops
-          | (if $pops == "" then "PoP not reported by the CDN" else "PoP " + $pops end) as $popcopy
+          | (if $pops == "" then "PoP not reported by the CDN" else "PoP " + ($pops | esc) end) as $popcopy
           | ($cur | map(select((isok | not) and (skipped | not) or skipped))) as $problems
           | ($problems | length) as $np
           | ($problems[0:50]) as $shown
@@ -258,7 +370,7 @@ runs:
                          elif ($ver | length) == 0 then "Nothing could be verified" else "No regression; some URLs are not served from cache" end) + "**"
                 + (if $cc == "neutral" and ($ver | length) == 0 then " (the list, robots.txt or the run prevented any verification; this is not a regression)" else "" end)
                 + "\n\nMeasured from the GitHub Actions runner (" + $popcopy + "). Only that PoP was checked; other PoPs were not."
-                + (if $site != "" then "\nSite: " + $site else "" end) + (if $sha != "" then "\nCommit: `" + $sha[0:12] + "`" else "" end)
+                + (if $site != "" then "\nSite: " + ($site | esc) else "" end) + (if $sha != "" then "\nCommit: `" + $sha[0:12] + "`" else "" end)
                 + "\n\n| HIT | MISS | Other cache states | Errors (5xx, timeout) | noindex | Not checked |\n|---|---|---|---|---|---|\n| "
                 + ($nhit | tostring) + " | " + ($nmiss | tostring) + " | "
                 + (($cur | map(select(.s != "hit" and .s != "miss" and (skipped | not) and (err | not))) | length) | tostring) + " | "
@@ -268,14 +380,14 @@ runs:
                 + (if ($havePrev | not) then "First run for this environment: this is the baseline, nothing to compare."
                    elif ($reg | length) == 0 and ($rec | length) == 0 then "No change in HIT, errors or noindex."
                    else
-                     (if ($reg | length) > 0 then "**Regressions**\n" + ($reg | map("- `" + lbl + "`: " + .kind) | join("\n")) + "\n" else "" end)
-                     + (if ($rec | length) > 0 then "\n**Recovered**\n" + ($rec | map("- `" + lbl + "`") | join("\n")) + "\n" else "" end)
+                     (if ($reg | length) > 0 then "**Regressions**\n" + ($reg | map("- `" + (lbl | code) + "`: " + (.kind | esc)) | join("\n")) + "\n" else "" end)
+                     + (if ($rec | length) > 0 then "\n**Recovered**\n" + ($rec | map("- `" + (lbl | code) + "`") | join("\n")) + "\n" else "" end)
                    end)
                 + (if $np == 0 then "" else
                     "\n\n### URLs to look at\n\n| URL | State | Status | Cause | Fix |\n|---|---|---|---|---|\n"
-                    + ($shown | map("| `" + (lbl | esc) + "` | " + (.s | esc) + " | " + (.h | esc) + " | " + (cause.c | esc) + " | " + (cause.f | esc) + " |") | join("\n"))
+                    + ($shown | map("| `" + (lbl | tcode) + "` | " + (.s | esc) + " | " + (.h | esc) + " | " + (cause.c | esc) + " | " + (cause.f | esc) + " |") | join("\n"))
                     + (if $np > 50 then "\n\nand " + (($np - 50) | tostring) + " more." else "" end) end)
-                + "\n\nThe verdict follows `fail-on: " + $failOn + "`. MISS alone never turns the Check red (it shows as neutral) unless `miss` is in that list."
+                + "\n\nThe verdict follows `fail-on: " + ($failOn | code) + "`. MISS alone never turns the Check red (it shows as neutral) unless `miss` is in that list."
               )
             }' "$OUT/state.json" > "$OUT/result.json"
 
@@ -287,7 +399,7 @@ runs:
         echo "conclusion=$(cat "$OUT/conclusion.txt")" >> "$GITHUB_OUTPUT"
 
     - name: Publish the Check
-      if: steps.guard.outputs.run == 'true'
+      if: steps.validate.outputs.mode == 'local' && steps.guard.outputs.run == 'true'
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}
@@ -308,3 +420,36 @@ runs:
         if [ "$code" != "201" ]; then
           echo "::warning title=sitewarm::The Check could not be created (HTTP $code). The result is in the job summary. Add 'checks: write' to the workflow permissions."
         fi
+
+    - name: Warm and verify (hosted)
+      id: hosted
+      if: steps.validate.outputs.mode == 'hosted'
+      shell: bash
+      env:
+        SITEWARM_ACTION_INPUT_API_KEY: ${{ inputs.api-key }}
+        SITEWARM_ACTION_INPUT_API_URL: ${{ inputs.api-url }}
+        SITEWARM_ACTION_INPUT_SITE: ${{ inputs.site }}
+        SITEWARM_ACTION_INPUT_SITEMAP_URL: ${{ inputs.sitemap-url }}
+        SITEWARM_ACTION_INPUT_WAIT: ${{ inputs.wait }}
+        SITEWARM_ACTION_INPUT_TIMEOUT: ${{ inputs.timeout }}
+        SITEWARM_ACTION_INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        SITEWARM_ACTION_INPUT_SITE_TOKEN: ${{ inputs.site-token }}
+      run: |
+        set -euo pipefail
+        # The bundle reads these SITEWARM_ACTION_INPUT_* variables (a prefix no CLI or doc uses, so an ambient SITEWARM_API_URL cannot stand in for an empty input); the key stays in the environment and is never on a command line.
+        exec node "$GITHUB_ACTION_PATH/hosted/index.js"
+
+    - name: Set the hosted conclusion
+      id: hosted_conclusion
+      if: always() && steps.validate.outputs.mode == 'hosted'
+      shell: bash
+      env:
+        OUTCOME: ${{ steps.hosted.outcome }}
+        WAIT: ${{ inputs.wait }}
+      run: |
+        set -euo pipefail
+        wait="$(printf '%s' "$WAIT" | tr '[:upper:]' '[:lower:]')"
+        if [ "$OUTCOME" != "success" ]; then c=failure
+        elif [ "$wait" = "false" ]; then c=neutral
+        else c=success; fi
+        echo "conclusion=$c" >> "$GITHUB_OUTPUT"
