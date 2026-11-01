@@ -21,7 +21,7 @@ jobs:
       SITEWARM_FAIL_ON: none
       SITEWARM_SITE: ambient.example
     steps:
-      - uses: actions/checkout@<commit pinned by the founder>
+      - uses: actions/checkout@<commit pinned by the maintainer>
       - name: Empty inputs
         id: canary
         uses: ./test/canary
